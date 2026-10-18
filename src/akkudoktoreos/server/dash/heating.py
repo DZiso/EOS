@@ -7,6 +7,7 @@ from fasthtml.common import H2, H3, Div, Li, P, Table, Tbody, Td, Th, Thead, Tr,
 
 from akkudoktoreos.heating.controller import parse_time
 from akkudoktoreos.heating.runtime import data_dir, load_json, settings
+from akkudoktoreos.server.dash.context import request_url_for
 
 
 def Heating() -> Div:
@@ -63,7 +64,7 @@ def Heating() -> Div:
         ),
         Table(Thead(Tr(Th("Time"), *(Th(r) for r in room_names), Th("Operation"))), Tbody(*rows)),
         id="heating-status",
-        hx_get="/eosdash/heating",
+        hx_get=request_url_for("heating"),
         hx_trigger="every 60s",
         hx_swap="outerHTML",
         cls="space-y-4 p-6 overflow-x-auto",

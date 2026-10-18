@@ -238,3 +238,22 @@ async def test_partial_dispatch_error_is_not_reported_as_zero_commands(tmp_path,
     assert status["commands_confirmed"] == 1
     assert status["commands_attempted"] == 2
     fake.apply.assert_called_once()
+
+
+def test_dashboard_refresh_keeps_ingress_prefix_and_rejects_stale_runtime(tmp_path, monkeypatch):
+    from fasthtml.common import to_xml
+
+    from akkudoktoreos.server.dash import context, heating
+
+    monkeypatch.setattr(context, "ROOT_PATH", "/api/hassio_ingress/test-prefix")
+    monkeypatch.setenv("EOS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("EOS_HEATING_CONFIG", str(tmp_path / "absent.json"))
+    runtime.save_json(tmp_path / "heating/status.json", {"state": "waiting_for_data"})
+    runtime.save_json(
+        tmp_path / "heating/plan.json",
+        {"generated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    html = to_xml(heating.Heating())
+    assert 'hx-get="/api/hassio_ingress/test-prefix/eosdash/heating"' in html
+    assert "No fresh plan" in html
+    assert ">Fresh plan<" not in html
