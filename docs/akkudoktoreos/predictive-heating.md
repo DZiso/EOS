@@ -105,8 +105,11 @@ because some Samsung devices turn on when those settings are written while off.
 `temperature_max_age_seconds` can reflect each source's actual report cadence;
 the real source timestamp and age remain visible. Optional `availability_entity`
 requires an integration connection sensor to be on. If a room reading is lost,
-an already-owned running unit returns to its uncorrected native `fallback_c`
-thermostat target. A unit without ownership or currently off is left alone.
+an already-owned unit returns to its uncorrected native `fallback_c` thermostat
+target, respecting minimum off time and manual overrides. Without ownership, an
+external-sensor room is left alone. Rooms with `room_feedback: false` use the AC's
+own thermostat, including when remote temperature reports stop. They stay in Heat
+at their target instead of being switched off by rounded AC temperature reports.
 This cannot guarantee occupied-room comfort during a sensor outage.
 
 To apply EOS schedules, set `optimization_enabled: true` and either provide a

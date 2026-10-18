@@ -203,9 +203,7 @@ def commands(
             decision.update(state="manual_override", override_until=lease["override_until"])
             continue
         reading = readings[room.id]
-        if not reading["usable"] and (
-            not lease.get("expected") or signature["hvac_mode"] != "heat"
-        ):
+        if not reading["usable"] and room.room_feedback and not lease.get("expected"):
             decision["state"] = "waiting_for_temperature"
             continue
         room_target = (
@@ -225,13 +223,14 @@ def commands(
         )
         if temperature is None:
             # Stop using a corrected high setpoint when the room sensor is lost.
-            # Only an already-owned running unit gets a native thermostat fallback.
+            # Native thermostats need no remote temperature report. A room with
+            # external feedback must already be owned before using this fallback.
             target = room.fallback_c
             decision.update(state="device_fallback", source="device_thermostat")
         else:
-            if temperature >= room.max_c - settings.comfort_margin_c:
+            if room.room_feedback and temperature >= room.max_c - settings.comfort_margin_c:
                 lease["comfort_paused"] = True
-            elif temperature <= room_target - 0.3:
+            elif not room.room_feedback or temperature <= room_target - 0.3:
                 lease["comfort_paused"] = False
             if lease.get("comfort_paused"):
                 decision.update(
@@ -251,12 +250,6 @@ def commands(
                         last_mode_change=now.timestamp(),
                     )
                 continue
-            if (
-                signature["hvac_mode"] == "off"
-                and now.timestamp() - lease.get("last_mode_change", 0) < 600
-            ):
-                decision["state"] = "minimum_off_time"
-                continue
             offset = (
                 _room_offset(room, state, reading, room_target, now, lease)
                 if room.room_feedback
@@ -264,6 +257,12 @@ def commands(
             )
             target = int(math.floor(room_target + offset + 0.5))
             decision["setpoint_offset_c"] = offset
+        if (
+            signature["hvac_mode"] == "off"
+            and now.timestamp() - lease.get("last_mode_change", 0) < 600
+        ):
+            decision["state"] = "minimum_off_time"
+            continue
         minimum, maximum = attrs.get("min_temp", 16), attrs.get("max_temp", 30)
         if (
             attrs.get("target_temp_step", 1) != 1

@@ -201,3 +201,33 @@ def test_observation_export_is_bounded_and_does_not_accept_paths(tmp_path,monkey
     assert result.json()['records']==[{'at':3},{'at':4}]
     assert client.get('/v1/heating/observations?day=../options').status_code==422
     assert client.get('/v1/heating/observations?limit=99999').status_code==422
+
+
+def test_native_thermostat_stays_armed_when_its_rounded_temperature_is_warm():
+    cfg, states, memory = setup_control()
+    states['sensor.other']['state'] = '22'
+    states['climate.other']['state'] = 'off'
+    calls = [c for c in commands(cfg,None,states,NOW,memory) if c['data']['entity_id']=='climate.other']
+    assert calls[0]['data']['hvac_mode']=='heat'
+    assert calls[-1]['data']['temperature']==21
+
+
+def test_native_thermostat_needs_no_remote_temperature_to_keep_heating_automatic():
+    cfg, states, memory = setup_control()
+    states['sensor.other']['state']='unavailable'
+    states['climate.other']['state']='off'
+    decisions: dict[str, Any] = {}
+    calls = [c for c in commands(cfg,None,states,NOW,memory,decisions) if c['data']['entity_id']=='climate.other']
+    assert calls[0]['data']['hvac_mode']=='heat'
+    assert calls[-1]['data']['temperature']==21
+    assert decisions['other']['source']=='device_thermostat'
+
+
+def test_lost_external_sensor_after_comfort_pause_uses_native_fallback_after_minimum_off_time():
+    cfg, states, memory = setup_control()
+    states['sensor.room']['state']='21.8'
+    acknowledge(states,commands(cfg,None,states,NOW,memory))
+    states['sensor.room']['state']='unavailable'
+    assert not [c for c in commands(cfg,None,states,NOW+timedelta(minutes=5),memory) if c['data']['entity_id']=='climate.room']
+    calls=[c for c in commands(cfg,None,states,NOW+timedelta(minutes=11),memory) if c['data']['entity_id']=='climate.room']
+    assert calls[0]['data']['hvac_mode']=='heat' and calls[-1]['data']['temperature']==21
