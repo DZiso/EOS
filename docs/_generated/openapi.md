@@ -851,6 +851,64 @@ Health check endpoint to verify that the EOS server is alive.
 
 ---
 
+## GET /v1/heating/plan
+
+<!-- pyml disable line-length -->
+**Links**: [local](http://localhost:8503/docs#/default/current_plan_v1_heating_plan_get), [eos](https://petstore3.swagger.io/?url=https://raw.githubusercontent.com/Akkudoktor-EOS/EOS/refs/heads/main/openapi.json#/default/current_plan_v1_heating_plan_get)
+<!-- pyml enable line-length -->
+
+Current Plan
+
+**Responses**:
+
+- **200**: Successful Response
+
+---
+
+## POST /v1/heating/plan
+
+<!-- pyml disable line-length -->
+**Links**: [local](http://localhost:8503/docs#/default/calculate_plan_v1_heating_plan_post), [eos](https://petstore3.swagger.io/?url=https://raw.githubusercontent.com/Akkudoktor-EOS/EOS/refs/heads/main/openapi.json#/default/calculate_plan_v1_heating_plan_post)
+<!-- pyml enable line-length -->
+
+Calculate Plan
+
+<!-- pyml disable line-length -->
+```python
+"""
+Simulate and optimize a schedule without executing or storing commands.
+"""
+```
+<!-- pyml enable line-length -->
+
+**Request Body**:
+
+- `application/json`: {
+  "$ref": "#/components/schemas/HeatingRequest"
+}
+
+**Responses**:
+
+- **200**: Successful Response
+
+- **422**: Validation Error
+
+---
+
+## GET /v1/heating/status
+
+<!-- pyml disable line-length -->
+**Links**: [local](http://localhost:8503/docs#/default/heating_status_v1_heating_status_get), [eos](https://petstore3.swagger.io/?url=https://raw.githubusercontent.com/Akkudoktor-EOS/EOS/refs/heads/main/openapi.json#/default/heating_status_v1_heating_status_get)
+<!-- pyml enable line-length -->
+
+Heating Status
+
+**Responses**:
+
+- **200**: Successful Response
+
+---
+
 ## GET /v1/logging/log
 
 <!-- pyml disable line-length -->

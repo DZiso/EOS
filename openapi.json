@@ -330,6 +330,94 @@
         }
       }
     },
+    "/v1/heating/plan": {
+      "get": {
+        "tags": [
+          "heating"
+        ],
+        "summary": "Current Plan",
+        "operationId": "current_plan_v1_heating_plan_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Current Plan V1 Heating Plan Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "heating"
+        ],
+        "summary": "Calculate Plan",
+        "description": "Simulate and optimize a schedule without executing or storing commands.",
+        "operationId": "calculate_plan_v1_heating_plan_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HeatingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Calculate Plan V1 Heating Plan Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/heating/status": {
+      "get": {
+        "tags": [
+          "heating"
+        ],
+        "summary": "Heating Status",
+        "operationId": "heating_status_v1_heating_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Heating Status V1 Heating Status Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/admin/cache/clear": {
       "post": {
         "tags": [
@@ -3792,6 +3880,100 @@
         "title": "BatteriesCommonSettings",
         "description": "Battery and electric vehicle device settings.\n\nUsed for both stationary batteries and EV battery packs.\n\nNote: Used for the GENETIC and GENETIC0 algorithm."
       },
+      "Battery": {
+        "properties": {
+          "capacity_kwh": {
+            "type": "number",
+            "maximum": 200.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Capacity Kwh",
+            "default": 1.92
+          },
+          "min_soc": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Soc",
+            "default": 0.1
+          },
+          "max_soc": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Soc",
+            "default": 0.8
+          },
+          "charge_kw": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 0.0,
+            "title": "Charge Kw",
+            "default": 1.2
+          },
+          "discharge_kw": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 0.0,
+            "title": "Discharge Kw",
+            "default": 0.2
+          },
+          "charge_efficiency": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Charge Efficiency",
+            "default": 0.95
+          },
+          "discharge_efficiency": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Discharge Efficiency",
+            "default": 0.95
+          },
+          "soc_entity": {
+            "type": "string",
+            "title": "Soc Entity",
+            "default": "sensor.hyper_2000_electric_level"
+          },
+          "max_soc_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Soc Entity"
+          },
+          "charge_limit_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Charge Limit Entity"
+          },
+          "discharge_limit_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discharge Limit Entity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Battery"
+      },
       "BatteryCapacityEstimate": {
         "properties": {
           "battery_id": {
@@ -4057,6 +4239,100 @@
         "title": "CommodityQuantity",
         "description": "Enumeration of specific commodity quantities and measurement types."
       },
+      "Compressor": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "rooms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Rooms"
+          },
+          "max_heat_kw": {
+            "type": "number",
+            "maximum": 30.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Heat Kw",
+            "default": 5.6
+          },
+          "max_electric_kw": {
+            "type": "number",
+            "maximum": 15.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Electric Kw",
+            "default": 2.5
+          },
+          "quiet_capacity_factor": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Quiet Capacity Factor",
+            "default": 0.65
+          },
+          "min_electric_kw": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Min Electric Kw",
+            "default": 0.25
+          },
+          "standby_kw": {
+            "type": "number",
+            "maximum": 0.2,
+            "minimum": 0.0,
+            "title": "Standby Kw",
+            "default": 0.01
+          },
+          "cop_at_7c": {
+            "type": "number",
+            "maximum": 7.0,
+            "minimum": 1.0,
+            "title": "Cop At 7C",
+            "default": 3.5
+          },
+          "cop_slope_per_k": {
+            "type": "number",
+            "maximum": 0.2,
+            "minimum": 0.0,
+            "title": "Cop Slope Per K",
+            "default": 0.06
+          },
+          "defrost_factor": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Defrost Factor",
+            "default": 0.85
+          },
+          "min_outside_c": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -40.0,
+            "title": "Min Outside C",
+            "default": -15
+          },
+          "max_outside_c": {
+            "type": "number",
+            "maximum": 40.0,
+            "minimum": 10.0,
+            "title": "Max Outside C",
+            "default": 24
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "rooms"
+        ],
+        "title": "Compressor"
+      },
       "ConfigEOS": {
         "properties": {
           "general": {
@@ -4191,6 +4467,32 @@
         ],
         "title": "ConsumerScheduleMode",
         "description": "Schedule mode of a flexible consumer (home appliance).\n\nDetermines how often a consumer's load profile is scheduled within the\noptimization horizon.\n\nModes\n-----\n- ONCE:\n    The consumer runs exactly once somewhere within the optimization\n    horizon (\"fire and forget\"). The optimizer picks the start.\n\n- DAILY:\n    The consumer runs once per local calendar day, but only on days for\n    which at least one complete, allowed run still fits into the remaining\n    horizon. The optimizer picks one start per eligible day."
+      },
+      "Coupling": {
+        "properties": {
+          "a": {
+            "type": "string",
+            "title": "A"
+          },
+          "b": {
+            "type": "string",
+            "title": "B"
+          },
+          "kw_per_k": {
+            "type": "number",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Kw Per K"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "a",
+          "b",
+          "kw_per_k"
+        ],
+        "title": "Coupling"
       },
       "CycleTimeWindowSequence-Input": {
         "properties": {
@@ -6678,6 +6980,69 @@
           "pvpower"
         ],
         "title": "ForecastResponse"
+      },
+      "ForecastSlot": {
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "At"
+          },
+          "outside_c": {
+            "type": "number",
+            "maximum": 50.0,
+            "minimum": -40.0,
+            "title": "Outside C"
+          },
+          "pv_kw": {
+            "type": "number",
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Pv Kw"
+          },
+          "baseline_kw": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Baseline Kw"
+          },
+          "import_price_per_kwh": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -1.0,
+            "title": "Import Price Per Kwh"
+          },
+          "export_price_per_kwh": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -1.0,
+            "title": "Export Price Per Kwh"
+          },
+          "battery_max_soc": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Battery Max Soc"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "at",
+          "outside_c",
+          "pv_kw",
+          "baseline_kw",
+          "import_price_per_kwh",
+          "export_price_per_kwh"
+        ],
+        "title": "ForecastSlot"
       },
       "GeneralSettings-Input": {
         "properties": {
@@ -10079,6 +10444,229 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HeatingRequest": {
+        "properties": {
+          "settings": {
+            "$ref": "#/components/schemas/HeatingSettings"
+          },
+          "inputs": {
+            "$ref": "#/components/schemas/PlanningInput"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "settings",
+          "inputs"
+        ],
+        "title": "HeatingRequest"
+      },
+      "HeatingSettings": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "control"
+            ],
+            "title": "Mode",
+            "default": "observe"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Europe/Berlin"
+          },
+          "rooms": {
+            "items": {
+              "$ref": "#/components/schemas/Room"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Rooms"
+          },
+          "compressors": {
+            "items": {
+              "$ref": "#/components/schemas/Compressor"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Compressors"
+          },
+          "couplings": {
+            "items": {
+              "$ref": "#/components/schemas/Coupling"
+            },
+            "type": "array",
+            "title": "Couplings"
+          },
+          "battery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Battery"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "day_price_per_kwh": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -1.0,
+            "title": "Day Price Per Kwh",
+            "default": 0.3
+          },
+          "night_price_per_kwh": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -1.0,
+            "title": "Night Price Per Kwh",
+            "default": 0.18
+          },
+          "export_price_per_kwh": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -1.0,
+            "title": "Export Price Per Kwh",
+            "default": 0.072466
+          },
+          "cheap_start_hour": {
+            "type": "integer",
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Cheap Start Hour",
+            "default": 0
+          },
+          "cheap_end_hour": {
+            "type": "integer",
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Cheap End Hour",
+            "default": 5
+          },
+          "quiet_start_hour": {
+            "type": "integer",
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Quiet Start Hour",
+            "default": 22
+          },
+          "quiet_end_hour": {
+            "type": "integer",
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Quiet End Hour",
+            "default": 7
+          },
+          "horizon_hours": {
+            "type": "integer",
+            "maximum": 36.0,
+            "minimum": 6.0,
+            "title": "Horizon Hours",
+            "default": 24
+          },
+          "block_minutes": {
+            "type": "integer",
+            "enum": [
+              30,
+              60
+            ],
+            "title": "Block Minutes",
+            "default": 60
+          },
+          "comfort_margin_c": {
+            "type": "number",
+            "maximum": 0.5,
+            "minimum": 0.0,
+            "title": "Comfort Margin C",
+            "default": 0.25
+          },
+          "measurement_max_age_seconds": {
+            "type": "integer",
+            "maximum": 7200.0,
+            "minimum": 60.0,
+            "title": "Measurement Max Age Seconds",
+            "default": 3600
+          },
+          "plan_max_age_seconds": {
+            "type": "integer",
+            "maximum": 1800.0,
+            "minimum": 60.0,
+            "title": "Plan Max Age Seconds",
+            "default": 1200
+          },
+          "manual_override_hours": {
+            "type": "number",
+            "maximum": 24.0,
+            "minimum": 0.25,
+            "title": "Manual Override Hours",
+            "default": 4
+          },
+          "baseline_kw": {
+            "type": "number",
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Baseline Kw",
+            "default": 0.3
+          },
+          "validated_model": {
+            "type": "boolean",
+            "title": "Validated Model",
+            "default": false
+          },
+          "battery_limits_verified": {
+            "type": "boolean",
+            "title": "Battery Limits Verified",
+            "default": false
+          },
+          "control_switch_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control Switch Entity"
+          },
+          "solar_planes": {
+            "items": {
+              "$ref": "#/components/schemas/SolarPlane"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Solar Planes"
+          },
+          "house_power_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "House Power Entity"
+          },
+          "hvac_energy_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Hvac Energy Entities"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "HeatingSettings"
       },
       "HomeApplianceCommonSettings-Input": {
         "properties": {
@@ -15057,6 +15645,59 @@
         "title": "PVForecastVrmCommonSettings",
         "description": "Common settings for PV forecast VRM API."
       },
+      "PlanningInput": {
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "temperatures_c": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Temperatures C"
+          },
+          "battery_soc": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Battery Soc"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/ForecastSlot"
+            },
+            "type": "array",
+            "maxItems": 144,
+            "minItems": 24,
+            "title": "Slots"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "generated_at",
+          "temperatures_c",
+          "slots"
+        ],
+        "title": "PlanningInput"
+      },
       "PowerMeasurement": {
         "properties": {
           "type": {
@@ -15250,6 +15891,93 @@
         "title": "PydanticDateTimeSeries",
         "description": "Pydantic model for validating pandas Series with datetime index in JSON format.\n\nThis model handles Series data serialized with orient='index', where the keys are\ndatetime strings and values are the series values. Provides validation and\nconversion between JSON and pandas Series with datetime index.\n\nAttributes:\n    data (Dict[str, Any]): Dictionary mapping datetime strings to values.\n    dtype (str): The data type of the series values.\n    tz (str | None): Timezone name if the datetime index is timezone-aware."
       },
+      "Room": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,47}$",
+            "title": "Id"
+          },
+          "climate_entity": {
+            "type": "string",
+            "pattern": "^climate\\.[a-z0-9_]+$",
+            "title": "Climate Entity"
+          },
+          "temperature_entity": {
+            "type": "string",
+            "pattern": "^(sensor|climate)\\.[a-z0-9_]+$",
+            "title": "Temperature Entity"
+          },
+          "temperature_attribute": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature Attribute"
+          },
+          "temperature_offset_c": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": -5.0,
+            "title": "Temperature Offset C",
+            "default": 0
+          },
+          "capacity_kwh_per_k": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 0.2,
+            "title": "Capacity Kwh Per K",
+            "default": 2
+          },
+          "loss_kw_per_k": {
+            "type": "number",
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Loss Kw Per K",
+            "default": 0.06
+          },
+          "max_heat_kw": {
+            "type": "number",
+            "maximum": 20.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Heat Kw",
+            "default": 3.2
+          },
+          "min_c": {
+            "type": "number",
+            "maximum": 28.0,
+            "minimum": 16.0,
+            "title": "Min C",
+            "default": 19
+          },
+          "max_c": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 17.0,
+            "title": "Max C",
+            "default": 22
+          },
+          "fallback_c": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 16.0,
+            "title": "Fallback C",
+            "default": 20
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "climate_entity",
+          "temperature_entity"
+        ],
+        "title": "Room"
+      },
       "RuntimeForecasts": {
         "properties": {
           "pv_forecast_wh": {
@@ -15381,6 +16109,13 @@
       },
       "ServerCommonSettings": {
         "properties": {
+          "heating_interval_sec": {
+            "type": "integer",
+            "maximum": 900.0,
+            "minimum": 60.0,
+            "title": "Heating Interval Sec",
+            "default": 60
+          },
           "host": {
             "type": "string",
             "title": "Host",
@@ -15878,6 +16613,36 @@
         ],
         "title": "SolarPanelBatteryParameters",
         "description": "PV battery device simulation configuration."
+      },
+      "SolarPlane": {
+        "properties": {
+          "surface_tilt": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": 0.0,
+            "title": "Surface Tilt"
+          },
+          "surface_azimuth": {
+            "type": "number",
+            "exclusiveMaximum": 360.0,
+            "minimum": 0.0,
+            "title": "Surface Azimuth"
+          },
+          "peakpower": {
+            "type": "number",
+            "maximum": 500.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Peakpower"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "surface_tilt",
+          "surface_azimuth",
+          "peakpower"
+        ],
+        "title": "SolarPlane"
       },
       "TailDiagnostics": {
         "properties": {

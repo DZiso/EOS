@@ -392,6 +392,7 @@
            "max_planes": 1
        },
        "server": {
+           "heating_interval_sec": 60,
            "host": "127.0.0.1",
            "port": 8503,
            "verbose": false,

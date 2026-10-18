@@ -11,6 +11,7 @@
 | eosdash_port | `EOS_SERVER__EOSDASH_PORT` | `int` | `rw` | `8504` | EOSdash server IP port number. Defaults to 8504. |
 | eosdash_public_url | `EOS_SERVER__EOSDASH_PUBLIC_URL` | `Optional[str]` | `rw` | `None` | Public EOSdash base URL for redirects and error-page links, including an optional proxy path prefix. Set this for reverse proxies or mapped ports; it does not change the bind address. Without it, direct access uses the request host and EOSdash port. Raw forwarded headers are not used. |
 | eosdash_supervise_interval_sec | `EOS_SERVER__EOSDASH_SUPERVISE_INTERVAL_SEC` | `int` | `rw` | `10` | Supervision interval for EOS server to supervise EOSdash [seconds]. |
+| heating_interval_sec | `EOS_SERVER__HEATING_INTERVAL_SEC` | `int` | `rw` | `60` | None |
 | host | `EOS_SERVER__HOST` | `str` | `rw` | `127.0.0.1` | EOS server IP address. Defaults to 127.0.0.1. |
 | port | `EOS_SERVER__PORT` | `int` | `rw` | `8503` | EOS server IP port number. Defaults to 8503. |
 | reload | `EOS_SERVER__RELOAD` | `Optional[bool]` | `rw` | `False` | Enable server auto-reload for debugging or development. Default is False. Monitors the package directory for changes and reloads the server. |
@@ -28,6 +29,7 @@
 ```json
    {
        "server": {
+           "heating_interval_sec": 60,
            "host": "127.0.0.1",
            "port": 8503,
            "verbose": false,
