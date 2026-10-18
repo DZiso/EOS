@@ -231,8 +231,8 @@ def test_observation_mode_cannot_emit_commands_even_with_a_plan():
     assert commands(cfg, {"feasible": True}, states(cfg, now), now, {}) == []
 
 
-def test_control_requires_validation_and_enable_helper():
-    with pytest.raises(ValidationError, match="validated"):
+def test_control_requires_enable_helper():
+    with pytest.raises(ValidationError, match="enable switch"):
         config(mode="control")
     cfg = controlled()
     now = inputs(cfg).generated_at

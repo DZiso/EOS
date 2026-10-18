@@ -16,6 +16,22 @@ def Heating() -> Div:
     proposal = load_json(data_dir() / "plan.json", {})
     timezone_local = ZoneInfo(config.timezone)
     room_names = [r.id for r in config.rooms]
+    room_rows = []
+    for room in config.rooms:
+        decision = state.get("rooms", {}).get(room.id, {})
+        measurement = decision.get("measurement", {})
+        age = measurement.get("age_seconds")
+        room_rows.append(
+            Tr(
+                Td(room.id),
+                Td(str(measurement.get("temperature_c", "—")) + "°C"),
+                Td(f"{max(0, age) / 60:.0f} min" if age is not None else "unknown"),
+                Td(str(decision.get("room_target_c", "—"))),
+                Td(str(decision.get("ac_target_c", "—"))),
+                Td(decision.get("source", "observation").replace("_", " ")),
+                Td(decision.get("state", "starting").replace("_", " ")),
+            )
+        )
     rows = []
     for slot in proposal.get("slots", [])[::4]:
         rows.append(
@@ -31,7 +47,7 @@ def Heating() -> Div:
     fresh = False
     if proposal:
         fresh = (
-            state.get("state") in {"observing", "controlling"}
+            state.get("plan_fresh", False)
             and 0
             <= datetime.now(timezone.utc).timestamp()
             - parse_time(proposal["generated_at"]).timestamp()
@@ -42,15 +58,39 @@ def Heating() -> Div:
         P(
             "Observation mode — proposed targets are not sent to your air conditioners."
             if config.mode == "observe"
-            else "Automatic control requires the Home Assistant enable switch."
+            else "Room control is enabled by the Home Assistant heating switch."
         ),
         P(
             f"Runtime: {state.get('state', 'not started')} · Latest plan: {proposal.get('generated_at', 'none')}"
         ),
         P("Fresh plan" if fresh else "No fresh plan — shown schedules must not be applied"),
         P(state.get("error") or ""),
+        P("Planning: " + (state.get("planning_error") or "available")),
         P("Comfort: " + ", ".join(f"{r.id}: {r.min_c:g}–{r.max_c:g}°C" for r in config.rooms)),
         P("Battery: existing automatic operation. Gas heating: unavailable."),
+        H3("Room control"),
+        P(
+            "Room targets and AC setpoints can differ because the sensors are at different heights. Age is time since the source last reported; unchanged readings are not relabelled as fresh."
+        ),
+        Table(
+            Thead(
+                Tr(
+                    *(
+                        Th(label)
+                        for label in (
+                            "Room",
+                            "Temperature",
+                            "Reading age",
+                            "Room target °C",
+                            "AC setpoint °C",
+                            "Target source",
+                            "Status",
+                        )
+                    )
+                )
+            ),
+            Tbody(*room_rows),
+        ),
         H3("Model estimates"),
         P(
             f"Heating electricity: {proposal.get('heating_kwh', 0):.2f} kWh · "

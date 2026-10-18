@@ -418,6 +418,71 @@
         }
       }
     },
+    "/v1/heating/observations": {
+      "get": {
+        "tags": [
+          "heating"
+        ],
+        "summary": "Observations",
+        "description": "Read bounded UTC-day telemetry, including actual command outcomes.",
+        "operationId": "observations_v1_heating_observations_get",
+        "parameters": [
+          {
+            "name": "day",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Day"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1440,
+              "minimum": 1,
+              "default": 120,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Observations V1 Heating Observations Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/admin/cache/clear": {
       "post": {
         "tags": [
@@ -10621,6 +10686,16 @@
             "title": "Validated Model",
             "default": false
           },
+          "optimization_enabled": {
+            "type": "boolean",
+            "title": "Optimization Enabled",
+            "default": false
+          },
+          "allow_estimated_model_control": {
+            "type": "boolean",
+            "title": "Allow Estimated Model Control",
+            "default": false
+          },
           "battery_limits_verified": {
             "type": "boolean",
             "title": "Battery Limits Verified",
@@ -10629,7 +10704,8 @@
           "control_switch_entity": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^input_boolean\\.[a-z0-9_]+$"
               },
               {
                 "type": "null"
@@ -15925,6 +16001,50 @@
             "minimum": -5.0,
             "title": "Temperature Offset C",
             "default": 0
+          },
+          "temperature_max_age_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 21600.0,
+                "minimum": 60.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature Max Age Seconds"
+          },
+          "availability_entity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^binary_sensor\\.[a-z0-9_]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Entity"
+          },
+          "room_feedback": {
+            "type": "boolean",
+            "title": "Room Feedback",
+            "default": false
+          },
+          "max_setpoint_offset_c": {
+            "type": "number",
+            "maximum": 8.0,
+            "minimum": 0.0,
+            "title": "Max Setpoint Offset C",
+            "default": 5
+          },
+          "feedback_interval_seconds": {
+            "type": "integer",
+            "maximum": 7200.0,
+            "minimum": 900.0,
+            "title": "Feedback Interval Seconds",
+            "default": 1800
           },
           "capacity_kwh_per_k": {
             "type": "number",

@@ -47,6 +47,7 @@ def setup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime, "forecast_points", forecast)
     monkeypatch.setattr(runtime, "_last_plan_attempt", 0)
+    monkeypatch.setattr(runtime, "_last_planning_error", None)
     return cfg, fake, states
 
 
@@ -229,7 +230,10 @@ def test_request_timeout_reports_unknown_sent_count(monkeypatch):
 @pytest.mark.asyncio
 async def test_partial_dispatch_error_is_not_reported_as_zero_commands(tmp_path, monkeypatch):
     cfg, fake, states = setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(runtime, "commands", lambda *args: dispatch_calls())
+    cfg.mode = "control"
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["state"] = "off"
     fake.apply.side_effect = runtime.CommandDispatchError(2, 1, 2)
     await runtime.heating_tick()
     status = json.loads((tmp_path / "heating/status.json").read_text())
@@ -257,3 +261,81 @@ def test_dashboard_refresh_keeps_ingress_prefix_and_rejects_stale_runtime(tmp_pa
     assert 'hx-get="/api/hassio_ingress/test-prefix/eosdash/heating"' in html
     assert "No fresh plan" in html
     assert ">Fresh plan<" not in html
+
+
+@pytest.mark.asyncio
+async def test_forecast_outage_does_not_stop_comfort_control(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    cfg.mode = "control"
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["state"] = "off"
+    monkeypatch.setattr(runtime, "forecast_points", AsyncMock(side_effect=ValueError("forecast stale")))
+    await runtime.heating_tick()
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert status["state"] == "controlling"
+    assert status["planning_error"] == "forecast stale"
+    assert status["rooms"]["room"]["source"] == "comfort"
+    assert status["commands_confirmed"] == 3
+    fake.apply.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_command_does_not_stop_another_room(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    cfg.mode = "control"
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["state"] = "off"
+    cfg.rooms.append(Room(id="other", climate_entity="climate.other", temperature_entity="sensor.other"))
+    cfg.compressors[0].rooms.append("other")
+    states["climate.other"] = deepcopy(states["climate.room"])
+    states["sensor.other"] = deepcopy(states["sensor.room"])
+    fake.apply.side_effect = [runtime.CommandDispatchError(1, 0, 1), 3]
+    await runtime.heating_tick()
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert fake.apply.call_count == 2
+    assert status["commands_sent"] == 4 and status["commands_confirmed"] == 3
+    assert status["rooms"]["room"]["state"] == "command_error"
+    assert status["rooms"]["other"]["dispatch"]["confirmed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_disable_during_dispatch_releases_ownership(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    cfg.mode = "control"
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["state"] = "off"
+    fake.apply.side_effect = runtime.ControlDisabled(0, 0, 0)
+    await runtime.heating_tick()
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert status["state"] == "disabled" and status["commands_sent"] == 0
+    assert json.loads((tmp_path / "heating/ownership.json").read_text()) == {}
+
+
+@pytest.mark.asyncio
+async def test_feedback_and_manual_override_survive_worker_restart(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    cfg.mode = "control"
+    cfg.rooms[0].room_feedback = True
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["attributes"]["current_temperature"] = 23
+    states["climate.room"]["last_reported"] = states["sensor.room"]["last_reported"]
+    await runtime.heating_tick()
+    path = tmp_path / "heating/ownership.json"
+    ownership = json.loads(path.read_text())
+    assert ownership["climate.room"]["setpoint_offset_c"] == 3
+    ownership["climate.room"]["override_until"] = datetime.now(timezone.utc).timestamp() + 3600
+    ownership["climate.room"]["expected"] = None
+    runtime.save_json(path, ownership)
+    fake.apply.reset_mock()
+    monkeypatch.setattr(runtime, "_last_plan_attempt", 0)
+    await runtime.heating_tick()
+    fake.apply.assert_not_called()
+    assert json.loads(path.read_text())["climate.room"]["setpoint_offset_c"] == 3
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert status["rooms"]["room"]["state"] == "manual_override"

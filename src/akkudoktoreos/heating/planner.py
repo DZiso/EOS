@@ -218,7 +218,9 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
     feasible = result["violation"] < 1e-6
     warnings = list(data.warnings)
     if not settings.validated_model:
-        warnings.append("Thermal parameters and COP are unvalidated estimates; observe only.")
+        warnings.append(
+            "Thermal parameters and COP are unvalidated estimates; savings are not measured."
+        )
     if settings.battery and not settings.battery_limits_verified:
         warnings.append("Battery limits are provisional; no battery commands are generated.")
     if not feasible:

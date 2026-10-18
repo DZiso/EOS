@@ -83,34 +83,54 @@ timestamps distinguish unchanged values from fresh readings. Missing/stale room
 temperatures, forecasts or SoC block a new plan; missing SoC never means zero.
 The Heating tab displays freshness, targets, predictions, estimates and warnings.
 
-Observation never calls climate services. An unapplied proposed schedule cannot
-validate a model against actual temperatures; associated residuals are explicitly
-labeled as unapplied-schedule residuals. Review actual heating periods and inputs
-before validating thermal parameters.
+Observation never calls climate services. A proposed schedule cannot validate a
+model against actual temperatures unless its actions and disturbances match the
+observed run. Logs retain actual command outcomes separately from model estimates.
 
-Control requires `mode: "control"`, `validated_model: true`, and a configured
-`control_switch_entity` (HA input boolean) currently on. It also requires usable
-room temperatures, Heat mode, integer targets and Quiet support during quiet hours.
-Only the current part of a fresh feasible plan is applied. Failed/stale/infeasible
-plans use the configured comfort fallback when room readings remain usable;
-otherwise existing device targets are retained. No mains switching or invented
-compressor commands. Quiet is applied without conflicting fan/sleep commands.
+Basic comfort control requires `mode: "control"` and a configured
+`control_switch_entity` (HA input boolean) currently on. It does not need a COP or
+thermal model. Each room uses `fallback_c` as its normal room target, bounded by
+the comfort margin. Missing forecasts or a missing sensor in another room do not
+stop a healthy room's thermostat.
 
-Manual changes suspend control for four hours by default. Ownership, target-hold
-times and overrides persist across restarts. Turning the helper off releases
-ownership. Two minutes are allowed for cloud acknowledgements; subsequent
-unexpected device state is treated as an override.
+Set `room_feedback: true` for an occupied-room sensor below the indoor head. The
+controller seeds a bounded AC setpoint offset from the head/room difference, then
+adjusts it by at most 0.5°C after a new room report and a 30-minute held demand.
+The default offset limit is ±5°C. Repeated polling of one report never accumulates
+corrections. The dashboard shows room targets and AC setpoints separately. A
+room near its upper comfort boundary pauses heating; restarting has a ten-minute
+minimum off time. An off command never includes preset or temperature commands,
+because some Samsung devices turn on when those settings are written while off.
+
+`temperature_max_age_seconds` can reflect each source's actual report cadence;
+the real source timestamp and age remain visible. Optional `availability_entity`
+requires an integration connection sensor to be on. If a room reading is lost,
+an already-owned running unit returns to its uncorrected native `fallback_c`
+thermostat target. A unit without ownership or currently off is left alone.
+This cannot guarantee occupied-room comfort during a sensor outage.
+
+To apply EOS schedules, set `optimization_enabled: true` and either provide a
+validated model or explicitly set `allow_estimated_model_control: true` for a
+trial. The latter keeps `validated_model: false` and all estimate warnings.
+Fresh feasible schedules choose bounded room targets; the comfort controller
+translates them to AC setpoints. Missing/stale/infeasible plans return to basic
+comfort control. Cached forecasts with missing retrieval metadata trigger a real
+refresh, limited to once per 15 minutes; cached data is never relabelled fresh.
+
+Manual changes suspend that room's control for four hours by default. Ownership,
+feedback offsets, target-hold times and overrides persist across app restarts.
+Turning the HA helper off releases ownership and stops further commands; it does
+not turn the ACs off. The executor checks the helper before every command.
 
 The executor waits up to 30 seconds for HA to acknowledge each command before
 sending the next dependent command. Mode changes reapply the preset and target:
 Samsung devices can restore old settings when switching modes. A missing
-acknowledgement stops the batch without blind retries. Status distinguishes sent,
-confirmed and attempted commands; a request timeout leaves the sent count unknown.
-Temperature freshness is checked on every observation, including between plans.
-
-An AC's internal temperature can differ substantially from the occupied-room
-sensor. Check this during commissioning; a matching numerical setpoint alone
-does not validate room comfort or the thermal model.
+acknowledgement stops that room's batch without blind retries; other rooms still
+run. Status distinguishes sent, confirmed and attempted commands; a request
+timeout leaves the sent count unknown. Two minutes are allowed for final cloud
+state convergence; later unexpected state is treated as a manual override.
+Quiet is applied without conflicting fan/sleep commands. No gas, mains-switching
+or battery commands are sent.
 
 Rollback: stop the app or disable `heating_enabled`. Observation has no device
 actions to undo. In control mode, disable its helper and restore the desired
@@ -120,6 +140,8 @@ normal thermostat targets. Existing solar/battery automations are not modified.
 
 - `GET /v1/heating/status`: configuration and runtime status.
 - `GET /v1/heating/plan`: last plan with generation timestamp.
+- `GET /v1/heating/observations?day=YYYY-MM-DD&limit=120`: bounded UTC-day
+  telemetry with source age, room decisions and actual command outcomes.
 - `POST /v1/heating/plan`: calculate from `{settings, inputs}` without storing or
   executing commands. Prices are currency per **kWh**, unlike GENETIC's per-Wh
   API. Powers are **kW**, energies **kWh**, temperatures **degrees Celsius**.
@@ -129,5 +151,5 @@ tariff/DST boundaries, missing inputs, comfort infeasibility, observation mode,
 manual overrides and the API:
 
 ```sh
-uv run --locked --extra dev pytest -q tests/test_heating.py tests/test_heating_runtime.py
+uv run --locked --extra dev pytest -q tests/test_heating*.py
 ```

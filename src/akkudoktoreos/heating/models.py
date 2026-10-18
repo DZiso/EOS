@@ -17,6 +17,11 @@ class Room(Model):
     temperature_entity: str = Field(pattern=r"^(sensor|climate)\.[a-z0-9_]+$")
     temperature_attribute: str | None = None
     temperature_offset_c: float = Field(default=0, ge=-5, le=5)
+    temperature_max_age_seconds: int | None = Field(default=None, ge=60, le=21600)
+    availability_entity: str | None = Field(default=None, pattern=r"^binary_sensor\.[a-z0-9_]+$")
+    room_feedback: bool = False
+    max_setpoint_offset_c: float = Field(default=5, ge=0, le=8)
+    feedback_interval_seconds: int = Field(default=1800, ge=900, le=7200)
     capacity_kwh_per_k: float = Field(default=2, ge=0.2, le=30)
     loss_kw_per_k: float = Field(default=0.06, ge=0, le=2)
     max_heat_kw: float = Field(default=3.2, gt=0, le=20)
@@ -103,8 +108,10 @@ class HeatingSettings(Model):
     manual_override_hours: float = Field(default=4, ge=0.25, le=24)
     baseline_kw: float = Field(default=0.3, ge=0, le=20)
     validated_model: bool = False
+    optimization_enabled: bool = False
+    allow_estimated_model_control: bool = False
     battery_limits_verified: bool = False
-    control_switch_entity: str | None = None
+    control_switch_entity: str | None = Field(default=None, pattern=r"^input_boolean\.[a-z0-9_]+$")
     solar_planes: list[SolarPlane] = Field(default_factory=list, max_length=8)
     house_power_entity: str | None = None
     hvac_energy_entities: list[str] = Field(default_factory=list)
@@ -139,8 +146,14 @@ class HeatingSettings(Model):
             raise ValueError("Enabled heating needs rooms")
         if any(r.max_c - r.min_c <= 2 * self.comfort_margin_c for r in self.rooms):
             raise ValueError("Comfort margin leaves no usable temperature range")
-        if self.mode == "control" and (not self.validated_model or not self.control_switch_entity):
-            raise ValueError("Control needs a validated model and a Home Assistant enable switch")
+        if self.mode == "control" and not self.control_switch_entity:
+            raise ValueError("Control needs a Home Assistant enable switch")
+        if self.optimization_enabled and not (
+            self.validated_model or self.allow_estimated_model_control
+        ):
+            raise ValueError(
+                "Optimization needs a validated model or explicit estimated-model opt-in"
+            )
         return self
 
 

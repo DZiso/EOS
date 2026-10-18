@@ -851,6 +851,36 @@ Health check endpoint to verify that the EOS server is alive.
 
 ---
 
+## GET /v1/heating/observations
+
+<!-- pyml disable line-length -->
+**Links**: [local](http://localhost:8503/docs#/default/observations_v1_heating_observations_get), [eos](https://petstore3.swagger.io/?url=https://raw.githubusercontent.com/Akkudoktor-EOS/EOS/refs/heads/main/openapi.json#/default/observations_v1_heating_observations_get)
+<!-- pyml enable line-length -->
+
+Observations
+
+<!-- pyml disable line-length -->
+```python
+"""
+Read bounded UTC-day telemetry, including actual command outcomes.
+"""
+```
+<!-- pyml enable line-length -->
+
+**Parameters**:
+
+- `day` (query, optional): No description provided.
+
+- `limit` (query, optional): No description provided.
+
+**Responses**:
+
+- **200**: Successful Response
+
+- **422**: Validation Error
+
+---
+
 ## GET /v1/heating/plan
 
 <!-- pyml disable line-length -->

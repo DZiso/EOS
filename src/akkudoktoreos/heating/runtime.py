@@ -19,6 +19,7 @@ from akkudoktoreos.heating.controller import (
     parse_time,
     read_number,
     read_temperatures,
+    temperature_status,
 )
 from akkudoktoreos.heating.models import ForecastSlot, HeatingSettings, PlanningInput
 from akkudoktoreos.heating.planner import plan, tariff_at
@@ -69,6 +70,10 @@ class CommandDispatchError(RuntimeError):
         self.attempted = attempted
 
 
+class ControlDisabled(CommandDispatchError):
+    """The live enable switch was turned off during a command sequence."""
+
+
 class HAClient:
     """Use the existing Supervisor token, never include credentials in results."""
 
@@ -110,7 +115,7 @@ class HAClient:
                 raise ValueError("Heating command acknowledgement timed out")
             time.sleep(1)
 
-    def apply(self, calls: list[dict[str, Any]]) -> int:
+    def apply(self, calls: list[dict[str, Any]], enable_entity: str | None = None) -> int:
         fields = {
             "set_hvac_mode": "hvac_mode",
             "set_preset_mode": "preset_mode",
@@ -128,6 +133,13 @@ class HAClient:
         expected: dict[str, dict[str, Any]] = {}
         for call in calls:
             entity = call["data"]["entity_id"]
+            if enable_entity:
+                try:
+                    enabled = self.request("GET", "/states/" + enable_entity).get("state") == "on"
+                except Exception:
+                    enabled = False
+                if not enabled:
+                    raise ControlDisabled(sent, confirmed, attempted, entity)
             attempted += 1
             try:
                 self.request("POST", "/services/climate/" + call["service"], call["data"])
@@ -189,8 +201,14 @@ async def bootstrap_forecasts(config: HeatingSettings, client: HAClient) -> None
     await get_ems().run(mode=EnergyManagementMode.PREDICTION)
 
 
+_last_forecast_recovery = float("-inf")
+
+
 async def forecast_points(key: str, now: datetime) -> list[tuple[float, float]]:
-    from akkudoktoreos.core.coreabc import get_prediction
+    from akkudoktoreos.core.coreabc import get_ems, get_prediction
+    from akkudoktoreos.core.emsettings import EnergyManagementMode
+
+    global _last_forecast_recovery
 
     prediction = get_prediction()
     source = None
@@ -198,6 +216,13 @@ async def forecast_points(key: str, now: datetime) -> list[tuple[float, float]]:
         if key in provider.record_keys:
             source = provider
             break
+    if source is not None and source.update_datetime is None:
+        # Cached BrightSky data can survive restart without its in-memory
+        # retrieval timestamp. Fetch real new data; never relabel cached data fresh.
+        # The EMS lock serializes this with scheduled forecast refreshes.
+        if time.monotonic() - _last_forecast_recovery >= 900:
+            _last_forecast_recovery = time.monotonic()
+            await get_ems().run(mode=EnergyManagementMode.PREDICTION, force_update=True)
     if source is None or source.update_datetime is None:
         raise ValueError(f"No updated EOS forecast provider for {key}")
     age = now.timestamp() - source.update_datetime.timestamp()
@@ -285,6 +310,7 @@ def record_observation(
     states: dict[str, dict[str, Any]],
     now: datetime,
     proposal: dict[str, Any] | None,
+    control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     entities = {r.temperature_entity for r in config.rooms} | {
         r.climate_entity for r in config.rooms
@@ -313,27 +339,17 @@ def record_observation(
                 if k in attrs
             },
         }
-    try:
-        actual = read_temperatures(config, states, now)
-        observation["temperatures_c"] = actual
-        if proposal:
-            # A slot's temperature is its end temperature, not its starting value.
-            point = min(
-                proposal.get("slots", []),
-                key=lambda s: abs(parse_time(s["at"]).timestamp() + 900 - now.timestamp()),
-                default=None,
-            )
-            if point and abs(parse_time(point["at"]).timestamp() + 900 - now.timestamp()) < 120:
-                observation["prediction_error_c"] = {
-                    r: actual[r] - point["temperatures_c"][r] for r in actual
-                }
-                observation["error_kind"] = (
-                    "proposed_schedule_not_applied"
-                    if config.mode == "observe"
-                    else "controlled_schedule"
-                )
-    except ValueError:
-        observation["temperature_quality"] = "unavailable_or_stale"
+    quality = temperature_status(config, states, now)
+    observation["measurements"] = quality
+    observation["temperatures_c"] = {
+        room: item["temperature_c"] for room, item in quality.items() if item["usable"]
+    }
+    if not all(item["usable"] for item in quality.values()):
+        observation["temperature_quality"] = "partially_unavailable_or_stale"
+    observation["control"] = control
+    if proposal:
+        observation["proposal_generated_at"] = proposal.get("generated_at")
+        observation["error_kind"] = "proposal_comparison_is_not_model_validation"
     path = data_dir() / ("observations-" + now.strftime("%Y-%m-%d") + ".jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as stream:
@@ -347,100 +363,133 @@ def record_observation(
 
 _lock = asyncio.Lock()
 _last_plan_attempt = 0.0
+_last_planning_error: str | None = None
+
+
+def safe_error(exc: Exception) -> str:
+    return str(exc) if isinstance(exc, (ValueError, CommandDispatchError)) else type(exc).__name__
 
 
 async def heating_tick() -> None:
-    """Collect once per minute and re-plan every fifteen minutes."""
-    global _last_plan_attempt
+    """Keep the room thermostat running independently of forecast failures."""
+    global _last_plan_attempt, _last_planning_error
     if _lock.locked():
         return
     async with _lock:
         now = datetime.now(timezone.utc)
         config = None
         states: dict[str, dict[str, Any]] = {}
-        client = None
         memory = load_json(data_dir() / "ownership.json", {})
         proposal = load_json(data_dir() / "plan.json", None)
+        status: dict[str, Any] = {
+            "at": now.isoformat(),
+            "state": "waiting_for_data",
+            "mode": "disabled",
+            "commands_sent": 0,
+            "commands_confirmed": 0,
+            "commands_attempted": 0,
+            "rooms": {},
+            "error": None,
+        }
         try:
             config = settings()
+            status.update(enabled=config.enabled, mode=config.mode)
             if not config.enabled:
+                status["state"] = "disabled"
+                save_json(data_dir() / "status.json", status)
                 return
             client = HAClient()
-            await bootstrap_forecasts(config, client)
             states = await asyncio.to_thread(client.states)
-            observation = await asyncio.to_thread(record_observation, config, states, now, proposal)
-            # Quality can deteriorate between 15-minute planning runs.
-            # Mark it immediately rather than displaying an old plan as ready.
-            read_temperatures(config, states, now)
-            previous_status = load_json(data_dir() / "status.json", {})
-            if (
-                now.timestamp() - _last_plan_attempt >= 900
-                or proposal is None
-                or previous_status.get("state") == "waiting_for_data"
-            ):
-                _last_plan_attempt = now.timestamp()
-                inputs = await planning_input(config, states, now)
-                proposal = await asyncio.to_thread(plan, config, inputs)
-                save_json(data_dir() / "input.json", inputs.model_dump(mode="json"))
-                save_json(data_dir() / "plan.json", proposal)
-            calls = commands(config, proposal, states, now, memory)
-            # Persist expected command state before dispatch. A partial cloud
-            # failure is then recognized on subsequent reads, including restarts.
-            save_json(data_dir() / "ownership.json", memory)
-            if calls:
-                await asyncio.to_thread(client.apply, calls)
-            save_json(
-                data_dir() / "status.json",
-                {
-                    "at": now.isoformat(),
-                    "enabled": True,
-                    "mode": config.mode,
-                    "state": "observing" if config.mode == "observe" else "controlling",
-                    "last_plan_at": proposal.get("generated_at") if proposal else None,
-                    "temperatures_c": observation.get("temperatures_c"),
-                    "commands_sent": len(calls),
-                    "commands_confirmed": len(calls),
-                    "error": None,
-                },
-            )
-        except Exception as exc:
-            # Do not leak request URLs or tokens from third-party exceptions.
-            error = (
-                str(exc)
-                if isinstance(exc, (ValueError, CommandDispatchError))
-                else type(exc).__name__
-            )
-            logger.warning("Heating cycle unavailable: {}", error)
-            status = {
-                "at": now.isoformat(),
-                "state": "command_error"
-                if isinstance(exc, CommandDispatchError)
-                else "waiting_for_data",
-                "mode": config.mode if config else "disabled",
-                "error": error,
-                "commands_sent": exc.sent if isinstance(exc, CommandDispatchError) else 0,
-                "commands_confirmed": exc.confirmed if isinstance(exc, CommandDispatchError) else 0,
-                "commands_attempted": exc.attempted if isinstance(exc, CommandDispatchError) else 0,
+            readings = temperature_status(config, states, now)
+            usable = all(item["usable"] for item in readings.values())
+            status["temperatures_c"] = {
+                room: item["temperature_c"] for room, item in readings.items() if item["usable"]
             }
-            if config and client and states and not isinstance(exc, CommandDispatchError):
+            # Failed forecast attempts retry at most every five minutes. Missing
+            # room values still prevent optimization but never stop other rooms.
+            interval = 300 if _last_planning_error or proposal is None else 900
+            if now.timestamp() - _last_plan_attempt >= interval:
+                _last_plan_attempt = now.timestamp()
                 try:
-                    fallback_calls = commands(config, None, states, now, memory)
-                    save_json(data_dir() / "ownership.json", memory)
-                    if fallback_calls:
-                        await asyncio.to_thread(client.apply, fallback_calls)
-                        status.update(
-                            commands_sent=len(fallback_calls),
-                            commands_confirmed=len(fallback_calls),
-                            commands_attempted=len(fallback_calls),
-                            fallback_active=True,
-                        )
-                except CommandDispatchError as fallback_error:
-                    status.update(
-                        state="command_error",
-                        commands_sent=fallback_error.sent,
-                        commands_confirmed=fallback_error.confirmed,
-                        commands_attempted=fallback_error.attempted,
+                    await bootstrap_forecasts(config, client)
+                    inputs = await planning_input(config, states, now)
+                    proposal = await asyncio.to_thread(plan, config, inputs)
+                    save_json(data_dir() / "input.json", inputs.model_dump(mode="json"))
+                    save_json(data_dir() / "plan.json", proposal)
+                    _last_planning_error = None
+                except Exception as exc:
+                    _last_planning_error = safe_error(exc)
+                    logger.warning("Heating planning unavailable: {}", _last_planning_error)
+            status["planning_error"] = _last_planning_error
+            status["last_plan_at"] = proposal.get("generated_at") if proposal else None
+            fresh = bool(
+                proposal
+                and usable
+                and not _last_planning_error
+                and 0
+                <= now.timestamp() - parse_time(proposal["generated_at"]).timestamp()
+                <= config.plan_max_age_seconds
+            )
+            status["plan_fresh"] = fresh
+            decisions: dict[str, Any] = {}
+            calls = commands(config, proposal if fresh else None, states, now, memory, decisions)
+            status["rooms"] = decisions
+            status["state"] = "observing" if config.mode == "observe" else "controlling"
+            if config.mode == "observe" and (not usable or _last_planning_error):
+                status.update(
+                    state="waiting_for_data",
+                    error=_last_planning_error or "Some room temperatures are unavailable",
+                )
+            if config.mode == "control" and all(
+                d["state"] == "disabled" for d in decisions.values()
+            ):
+                status["state"] = "disabled"
+            # Persist the intended signatures before dispatch, including partial
+            # failures, so a restart cannot cause an immediate blind retry.
+            save_json(data_dir() / "ownership.json", memory)
+            by_entity: dict[str, list[dict[str, Any]]] = {}
+            for call in calls:
+                by_entity.setdefault(call["data"]["entity_id"], []).append(call)
+            for entity, batch in by_entity.items():
+                room_id = next(r.id for r in config.rooms if r.climate_entity == entity)
+                decision = decisions[room_id]
+                try:
+                    await asyncio.to_thread(client.apply, batch, config.control_switch_entity)
+                    result: dict[str, int | None] = {
+                        "sent": len(batch),
+                        "confirmed": len(batch),
+                        "attempted": len(batch),
+                    }
+                except CommandDispatchError as exc:
+                    result = {
+                        "sent": exc.sent,
+                        "confirmed": exc.confirmed,
+                        "attempted": exc.attempted,
+                    }
+                    if isinstance(exc, ControlDisabled):
+                        memory.clear()
+                        status["state"] = "disabled"
+                        for item in decisions.values():
+                            item["state"] = "disabled"
+                    else:
+                        decision.update(state="command_error", error=str(exc))
+                        status.update(state="command_error", error=str(exc))
+                decision["dispatch"] = result
+                for key in ("sent", "confirmed", "attempted"):
+                    field = "commands_" + key
+                    status[field] = (
+                        None
+                        if result[key] is None or status[field] is None
+                        else status[field] + result[key]
                     )
-                except Exception:
-                    logger.warning("Heating comfort fallback unavailable; device targets retained")
-            save_json(data_dir() / "status.json", status)
+                save_json(data_dir() / "ownership.json", memory)
+                if status["state"] == "disabled":
+                    break
+            status["fallback_active"] = any(d.get("source") != "eos" for d in decisions.values())
+        except Exception as exc:
+            status["state"] = "cycle_error"
+            status["error"] = safe_error(exc)
+            logger.warning("Heating cycle unavailable: {}", status["error"])
+        if config:
+            await asyncio.to_thread(record_observation, config, states, now, proposal, status)
+        save_json(data_dir() / "status.json", status)

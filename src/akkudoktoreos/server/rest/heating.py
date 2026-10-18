@@ -1,8 +1,11 @@
 """Read-only runtime status and an isolated thermal planning API."""
 
+import json
+from collections import deque
+from datetime import date, datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from akkudoktoreos.heating.models import HeatingSettings, Model, PlanningInput
 from akkudoktoreos.heating.planner import plan
@@ -40,3 +43,20 @@ def current_plan() -> dict[str, Any]:
     if result is None:
         raise HTTPException(404, "No heating plan has been calculated")
     return result
+
+
+@router.get("/observations")
+def observations(day: date | None = None, limit: int = Query(120, ge=1, le=1440)) -> dict[str, Any]:
+    """Read bounded UTC-day telemetry, including actual command outcomes."""
+    selected = day or datetime.now(timezone.utc).date()
+    path = data_dir() / ("observations-" + selected.isoformat() + ".jsonl")
+    records = []
+    if path.exists():
+        with path.open() as stream:
+            for line in deque(stream, maxlen=limit):
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    # A concurrent append may leave its final line incomplete.
+                    continue
+    return {"day": selected.isoformat(), "count": len(records), "records": records}
