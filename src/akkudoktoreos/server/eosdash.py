@@ -30,6 +30,7 @@ from akkudoktoreos.server.dash.context import (
     safe_asset_path,
 )
 from akkudoktoreos.server.dash.footer import Footer
+from akkudoktoreos.server.dash.heating import Heating
 from akkudoktoreos.server.dash.plan import Plan
 from akkudoktoreos.server.dash.prediction import Prediction
 from akkudoktoreos.server.server import (
@@ -258,6 +259,7 @@ def get_eosdash(request: Request):  # type: ignore
             None,
             {
                 "Plan": "/eosdash/plan",
+                "Heating": "/eosdash/heating",
                 "Prediction": "/eosdash/prediction",
                 "Config": "/eosdash/configuration",
                 "Admin": "/eosdash/admin",
@@ -268,6 +270,11 @@ def get_eosdash(request: Request):  # type: ignore
             "/eosdash/footer",
         ),
     )
+
+
+@app.get("/eosdash/heating")
+def get_eosdash_heating(request: Request):  # type: ignore
+    return Heating()
 
 
 @app.get("/eosdash/footer")

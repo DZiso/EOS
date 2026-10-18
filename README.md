@@ -3,6 +3,10 @@
 
 **Build optimized energy management plans for your home automation**
 
+This fork adds optional predictive heating for coupled rooms and shared
+air-conditioner compressors, with quiet hours and a Home Assistant observation
+mode. See the [heating guide](docs/akkudoktoreos/predictive-heating.md).
+
 AkkudoktorEOS is a comprehensive solution for simulating and optimizing energy systems based on
 renewable sources. Optimize your photovoltaic systems, battery storage, load management, and
 electric vehicles while considering real-time electricity pricing.

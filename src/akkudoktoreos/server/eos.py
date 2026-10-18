@@ -55,6 +55,7 @@ from akkudoktoreos.core.types import (
 )
 from akkudoktoreos.core.version import __version__
 from akkudoktoreos.devices.devices import ResourceKey
+from akkudoktoreos.heating.runtime import heating_tick
 from akkudoktoreos.optimization.genetic0.genetic0params import (
     Genetic0OptimizationParameters,
 )
@@ -79,6 +80,7 @@ from akkudoktoreos.server.rest.error import (
     create_error_page,
     register_problem_handlers,
 )
+from akkudoktoreos.server.rest.heating import router as heating_router
 from akkudoktoreos.server.rest.measurement import router as measurement_router
 from akkudoktoreos.server.rest.starteosdash import supervise_eosdash
 from akkudoktoreos.server.retentionmanager import RetentionManager
@@ -216,6 +218,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         interval_attr="database/compaction_interval_sec",
     )
     manager.register("manage_energy", ems_manage_energy, interval_attr="ems/interval")
+    manager.register(
+        "heating_observation", heating_tick, interval_attr="server/heating_interval_sec"
+    )
 
     # Start the manager an by this all EOS repeated tasks
     retention_manager_task = asyncio.create_task(manager.run(activation_condition=config_eos_ready))
@@ -262,6 +267,7 @@ The genetic optimization API fields were renamed from German to English. For bac
 # ----------------------
 
 app.include_router(measurement_router)
+app.include_router(heating_router)
 
 register_problem_handlers(app)
 

@@ -88,6 +88,8 @@ ENV EOS_SERVER__EOSDASH_SESSKEY=s3cr3t
 # server.eosdash_host defaults to 127.0.0.1 (not None), so it does not
 # inherit --host 0.0.0.0 from the CLI.
 ENV EOS_SERVER__EOSDASH_HOST=0.0.0.0
+# Heating has a separate guarded executor; only forecasts are requested from EMS.
+ENV EOS_EMS__MODE=PREDICTION
 
 # Set environment variables to reduce threading needs
 ENV OPENBLAS_NUM_THREADS=1

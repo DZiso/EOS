@@ -391,6 +391,8 @@ def fix_data_directories_permissions(run_as_user: Optional[str] = None) -> None:
 class ServerCommonSettings(SettingsBaseModel):
     """Server Configuration."""
 
+    heating_interval_sec: int = Field(default=60, ge=60, le=900)
+
     host: str = Field(
         default=get_default_host(),
         json_schema_extra={

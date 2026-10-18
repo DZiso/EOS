@@ -4,6 +4,6 @@
 #
 # The Akkudoktor-EOS add-on repo is special because there is only one add-on and it is in
 # the root directory (no add-on folder as usual).
-name: Akkudoktor-EOS
-url: http://github.com/Akkudoktor-EOS/EOS
-maintainer: Akkudoktor-EOS Team
+name: EOS Predictive Heating
+url: https://github.com/DZiso/EOS
+maintainer: DZiso
