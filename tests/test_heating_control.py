@@ -231,3 +231,24 @@ def test_lost_external_sensor_after_comfort_pause_uses_native_fallback_after_min
     assert not [c for c in commands(cfg,None,states,NOW+timedelta(minutes=5),memory) if c['data']['entity_id']=='climate.room']
     calls=[c for c in commands(cfg,None,states,NOW+timedelta(minutes=11),memory) if c['data']['entity_id']=='climate.room']
     assert calls[0]['data']['hvac_mode']=='heat' and calls[-1]['data']['temperature']==21
+
+
+def test_three_hour_override_expires_and_control_resumes_after_memory_reload():
+    cfg, states, memory = setup_control()
+    cfg.manual_override_hours = 3
+    acknowledge(states, commands(cfg, None, states, NOW, memory))
+    changed_at = NOW + timedelta(minutes=3)
+    states['climate.room']['attributes']['temperature'] = 24
+    commands(cfg, None, states, changed_at, memory)
+    assert memory['climate.room']['override_until'] == changed_at.timestamp() + 3*3600
+    # Persisted ownership is all the worker needs after a restart.
+    restored = json.loads(json.dumps(memory))
+    before_expiry = changed_at + timedelta(hours=3, seconds=-1)
+    states['sensor.room']['last_reported'] = before_expiry.isoformat()
+    decisions: dict[str, Any] = {}
+    assert not [c for c in commands(cfg,None,states,before_expiry,restored,decisions) if c['data']['entity_id']=='climate.room']
+    assert decisions['room']['state']=='manual_override'
+    after_expiry = changed_at + timedelta(hours=3, seconds=1)
+    calls=[c for c in commands(cfg,None,states,after_expiry,restored,decisions) if c['data']['entity_id']=='climate.room']
+    assert calls and decisions['room']['state']=='active'
+    assert decisions['room']['room_target_c']==21
