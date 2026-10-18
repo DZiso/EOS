@@ -245,9 +245,11 @@ def test_fallback_is_quiet_and_does_not_set_fan_or_control_battery():
     cfg = controlled()
     now = inputs(cfg).generated_at
     calls = commands(cfg, None, states(cfg, now), now, {})
-    assert len(calls) == 2
+    assert len(calls) == 4
+    assert {c["service"] for c in calls} == {"set_preset_mode", "set_temperature"}
     assert all(
-        c["service"] == "set_preset_mode" and c["data"]["preset_mode"] == "quiet" for c in calls
+        c["data"].get("preset_mode") == "quiet" or c["data"].get("temperature") == 20
+        for c in calls
     )
 
 

@@ -127,3 +127,114 @@ def test_pending_cloud_ack_does_not_retry_and_extend_lease(tmp_path, monkeypatch
     assert memory["climate.room"]["pending_until"] == deadline
     assert commands(cfg, None, states, now + timedelta(seconds=180), memory) == []
     assert memory["climate.room"]["override_until"] > now.timestamp() + 180
+
+
+def test_mode_change_reasserts_target_and_preset(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    cfg.mode = "control"
+    cfg.validated_model = True
+    cfg.control_switch_entity = "input_boolean.enable"
+    states["input_boolean.enable"] = {"state": "on"}
+    states["climate.room"]["state"] = "off"
+    # Both settings already match, but Samsung can reset them on power-up.
+    cfg.quiet_start_hour = cfg.quiet_end_hour = 0
+    states["climate.room"]["attributes"]["preset_mode"] = "quiet"
+    calls = commands(cfg, None, states, datetime.now(timezone.utc), {})
+    assert [c["service"] for c in calls] == [
+        "set_hvac_mode", "set_preset_mode", "set_temperature"
+    ]
+    assert calls[-1]["data"]["temperature"] == 20
+
+
+@pytest.mark.asyncio
+async def test_temperature_becoming_stale_invalidates_status_between_plans(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    await runtime.heating_tick()
+    states["sensor.room"]["last_reported"] = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat()
+    await runtime.heating_tick()
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert status["state"] == "waiting_for_data"
+    assert status["commands_sent"] == 0
+    fake.apply.assert_not_called()
+
+
+def dispatch_calls():
+    return [
+        {"domain": "climate", "service": service,
+         "data": {"entity_id": "climate.room", key: value}}
+        for service, key, value in [
+            ("set_hvac_mode", "hvac_mode", "heat"),
+            ("set_preset_mode", "preset_mode", "quiet"),
+            ("set_temperature", "temperature", 20),
+        ]
+    ]
+
+
+def test_dispatch_waits_for_feedback_before_dependent_commands(monkeypatch):
+    client = object.__new__(runtime.HAClient)
+    seen = []
+    state: dict[str, Any] = {
+        "state": "off", "attributes": {"temperature": 24, "preset_mode": "none"}
+    }
+    pending = None
+    reads = 0
+
+    def request(method, path, body=None):
+        nonlocal pending, reads
+        seen.append((method, path))
+        if method == "POST":
+            assert pending is None, "next command was sent before cloud acknowledgement"
+            pending = body
+            reads = 0
+            return []
+        reads += 1
+        if reads == 2 and pending:
+            for key, value in pending.items():
+                if key == "hvac_mode":
+                    state["state"] = value
+                elif key != "entity_id":
+                    state["attributes"][key] = value
+            pending = None
+        return state
+
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _: None)
+    assert client.apply(dispatch_calls()) == 3
+    assert [method for method, _ in seen] == ["POST", "GET", "GET"] * 3
+
+
+def test_missing_ack_stops_batch_and_preserves_partial_counts(monkeypatch):
+    client = object.__new__(runtime.HAClient)
+    client.ack_timeout_seconds = 0
+    fake = Mock(return_value={"state": "off", "attributes": {}})
+    monkeypatch.setattr(client, "request", fake)
+    with pytest.raises(runtime.CommandDispatchError) as caught:
+        client.apply(dispatch_calls())
+    assert (caught.value.sent, caught.value.confirmed, caught.value.attempted) == (1, 0, 1)
+    assert sum(c.args[0] == "POST" for c in fake.call_args_list) == 1
+
+
+def test_request_timeout_reports_unknown_sent_count(monkeypatch):
+    client = object.__new__(runtime.HAClient)
+    monkeypatch.setattr(client, "request", Mock(side_effect=TimeoutError("private request")))
+    with pytest.raises(runtime.CommandDispatchError) as caught:
+        client.apply(dispatch_calls())
+    assert caught.value.sent is None
+    assert caught.value.confirmed == 0
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_partial_dispatch_error_is_not_reported_as_zero_commands(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime, "commands", lambda *args: dispatch_calls())
+    fake.apply.side_effect = runtime.CommandDispatchError(2, 1, 2)
+    await runtime.heating_tick()
+    status = json.loads((tmp_path / "heating/status.json").read_text())
+    assert status["state"] == "command_error"
+    assert status["commands_sent"] == 2
+    assert status["commands_confirmed"] == 1
+    assert status["commands_attempted"] == 2
+    fake.apply.assert_called_once()

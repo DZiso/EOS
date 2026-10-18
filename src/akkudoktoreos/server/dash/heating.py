@@ -30,7 +30,8 @@ def Heating() -> Div:
     fresh = False
     if proposal:
         fresh = (
-            0
+            state.get("state") in {"observing", "controlling"}
+            and 0
             <= datetime.now(timezone.utc).timestamp()
             - parse_time(proposal["generated_at"]).timestamp()
             <= config.plan_max_age_seconds

@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import time
 from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +55,20 @@ def load_json(path: Path, default: Any) -> Any:
         return default
 
 
+class CommandDispatchError(RuntimeError):
+    """Preserve partial dispatch evidence without leaking HTTP credentials."""
+
+    def __init__(
+        self, sent: int | None, confirmed: int, attempted: int, entity: str = "climate device"
+    ) -> None:
+        super().__init__(
+            f"Home Assistant did not confirm the heating command sequence for {entity}"
+        )
+        self.sent = sent
+        self.confirmed = confirmed
+        self.attempted = attempted
+
+
 class HAClient:
     """Use the existing Supervisor token, never include credentials in results."""
 
@@ -78,15 +93,58 @@ class HAClient:
     def states(self) -> dict[str, dict[str, Any]]:
         return {s["entity_id"]: s for s in self.request("GET", "/states")}
 
-    def apply(self, calls: list[dict[str, Any]]) -> None:
+    ack_timeout_seconds = 30.0
+
+    def wait_for_ack(self, entity: str, expected: dict[str, Any]) -> None:
+        deadline = time.monotonic() + self.ack_timeout_seconds
+        while True:
+            state = self.request("GET", "/states/" + entity)
+            actual = {
+                "hvac_mode": state.get("state"),
+                "preset_mode": state.get("attributes", {}).get("preset_mode") or "none",
+                "temperature": state.get("attributes", {}).get("temperature"),
+            }
+            if all(actual.get(key) == value for key, value in expected.items()):
+                return
+            if time.monotonic() >= deadline:
+                raise ValueError("Heating command acknowledgement timed out")
+            time.sleep(1)
+
+    def apply(self, calls: list[dict[str, Any]]) -> int:
+        fields = {
+            "set_hvac_mode": "hvac_mode",
+            "set_preset_mode": "preset_mode",
+            "set_temperature": "temperature",
+        }
+        # Validate the entire batch before making any changes.
         for call in calls:
-            if call["domain"] != "climate" or call["service"] not in {
-                "set_temperature",
-                "set_hvac_mode",
-                "set_preset_mode",
-            }:
+            if (
+                call["domain"] != "climate"
+                or call["service"] not in fields
+                or not call["data"].get("entity_id", "").startswith("climate.")
+            ):
                 raise ValueError("Unsupported heating command")
-            self.request("POST", "/services/climate/" + call["service"], call["data"])
+        sent = confirmed = attempted = 0
+        expected: dict[str, dict[str, Any]] = {}
+        for call in calls:
+            entity = call["data"]["entity_id"]
+            attempted += 1
+            try:
+                self.request("POST", "/services/climate/" + call["service"], call["data"])
+            except Exception:
+                # A timeout can occur after HA accepted the command.
+                raise CommandDispatchError(None, confirmed, attempted, entity) from None
+            sent += 1
+            expected.setdefault(entity, {})[fields[call["service"]]] = call["data"][
+                fields[call["service"]]
+            ]
+            try:
+                # Wait for cloud feedback before the next dependent command.
+                self.wait_for_ack(entity, expected[entity])
+            except Exception:
+                raise CommandDispatchError(sent, confirmed, attempted, entity) from None
+            confirmed += 1
+        return confirmed
 
 
 def interpolate(points: list[tuple[float, float]], stamp: float, solar: bool = False) -> float:
@@ -311,6 +369,9 @@ async def heating_tick() -> None:
             await bootstrap_forecasts(config, client)
             states = await asyncio.to_thread(client.states)
             observation = await asyncio.to_thread(record_observation, config, states, now, proposal)
+            # Quality can deteriorate between 15-minute planning runs.
+            # Mark it immediately rather than displaying an old plan as ready.
+            read_temperatures(config, states, now)
             previous_status = load_json(data_dir() / "status.json", {})
             if (
                 now.timestamp() - _last_plan_attempt >= 900
@@ -338,28 +399,48 @@ async def heating_tick() -> None:
                     "last_plan_at": proposal.get("generated_at") if proposal else None,
                     "temperatures_c": observation.get("temperatures_c"),
                     "commands_sent": len(calls),
+                    "commands_confirmed": len(calls),
                     "error": None,
                 },
             )
         except Exception as exc:
             # Do not leak request URLs or tokens from third-party exceptions.
-            error = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
-            logger.warning("Heating cycle unavailable: {}", error)
-            save_json(
-                data_dir() / "status.json",
-                {
-                    "at": now.isoformat(),
-                    "state": "waiting_for_data",
-                    "mode": config.mode if config else "disabled",
-                    "error": error,
-                    "commands_sent": 0,
-                },
+            error = (
+                str(exc)
+                if isinstance(exc, (ValueError, CommandDispatchError))
+                else type(exc).__name__
             )
-            if config and client and states:
+            logger.warning("Heating cycle unavailable: {}", error)
+            status = {
+                "at": now.isoformat(),
+                "state": "command_error"
+                if isinstance(exc, CommandDispatchError)
+                else "waiting_for_data",
+                "mode": config.mode if config else "disabled",
+                "error": error,
+                "commands_sent": exc.sent if isinstance(exc, CommandDispatchError) else 0,
+                "commands_confirmed": exc.confirmed if isinstance(exc, CommandDispatchError) else 0,
+                "commands_attempted": exc.attempted if isinstance(exc, CommandDispatchError) else 0,
+            }
+            if config and client and states and not isinstance(exc, CommandDispatchError):
                 try:
                     fallback_calls = commands(config, None, states, now, memory)
                     save_json(data_dir() / "ownership.json", memory)
                     if fallback_calls:
                         await asyncio.to_thread(client.apply, fallback_calls)
+                        status.update(
+                            commands_sent=len(fallback_calls),
+                            commands_confirmed=len(fallback_calls),
+                            commands_attempted=len(fallback_calls),
+                            fallback_active=True,
+                        )
+                except CommandDispatchError as fallback_error:
+                    status.update(
+                        state="command_error",
+                        commands_sent=fallback_error.sent,
+                        commands_confirmed=fallback_error.confirmed,
+                        commands_attempted=fallback_error.attempted,
+                    )
                 except Exception:
                     logger.warning("Heating comfort fallback unavailable; device targets retained")
+            save_json(data_dir() / "status.json", status)

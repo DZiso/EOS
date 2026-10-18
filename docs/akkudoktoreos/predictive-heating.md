@@ -101,6 +101,17 @@ times and overrides persist across restarts. Turning the helper off releases
 ownership. Two minutes are allowed for cloud acknowledgements; subsequent
 unexpected device state is treated as an override.
 
+The executor waits up to 30 seconds for HA to acknowledge each command before
+sending the next dependent command. Mode changes reapply the preset and target:
+Samsung devices can restore old settings when switching modes. A missing
+acknowledgement stops the batch without blind retries. Status distinguishes sent,
+confirmed and attempted commands; a request timeout leaves the sent count unknown.
+Temperature freshness is checked on every observation, including between plans.
+
+An AC's internal temperature can differ substantially from the occupied-room
+sensor. Check this during commissioning; a matching numerical setpoint alone
+does not validate room comfort or the thermal model.
+
 Rollback: stop the app or disable `heating_enabled`. Observation has no device
 actions to undo. In control mode, disable its helper and restore the desired
 normal thermostat targets. Existing solar/battery automations are not modified.
@@ -118,5 +129,5 @@ tariff/DST boundaries, missing inputs, comfort infeasibility, observation mode,
 manual overrides and the API:
 
 ```sh
-uv run --locked --extra dev pytest -q tests/test_heating.py
+uv run --locked --extra dev pytest -q tests/test_heating.py tests/test_heating_runtime.py
 ```

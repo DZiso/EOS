@@ -151,12 +151,18 @@ def commands(
         desired_preset = "quiet" if quiet else "none"
         wanted = {"hvac_mode": "heat", "temperature": target, "preset_mode": desired_preset}
         entity_calls = []
+        mode_changed = signature.get("hvac_mode") != wanted["hvac_mode"]
+        preset_changed = signature.get("preset_mode") != wanted["preset_mode"]
         for key, service in (
             ("hvac_mode", "set_hvac_mode"),
             ("preset_mode", "set_preset_mode"),
             ("temperature", "set_temperature"),
         ):
-            if signature.get(key) != wanted[key]:
+            # Samsung mode changes can restore a previous target and reset
+            # Quiet. Reassert dependent settings even if the pre-command
+            # snapshot already showed their desired values.
+            force = mode_changed or (key == "temperature" and preset_changed)
+            if signature.get(key) != wanted[key] or force:
                 entity_calls.append(
                     {
                         "domain": "climate",
