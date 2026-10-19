@@ -66,11 +66,30 @@ def Heating() -> Div:
         P("Fresh plan" if fresh else "No fresh plan — shown schedules must not be applied"),
         P(state.get("error") or ""),
         P("Planning: " + (state.get("planning_error") or "available")),
-        P("Comfort: " + ", ".join(f"{r.id}: {r.min_c:g}–{r.max_c:g}°C" for r in config.rooms)),
+        P(
+            "Comfort: "
+            + ", ".join(
+                f"{r.id}: {r.min_c:g}–{r.max_c:g}°C"
+                + (
+                    f"; night {r.night_comfort.min_c:g}–{r.night_comfort.max_c:g}°C"
+                    if r.night_comfort
+                    else ""
+                )
+                for r in config.rooms
+            )
+        ),
+        P(
+            f"Night / Quiet: {config.quiet_start_hour:02d}:00–{config.quiet_end_hour:02d}:00 ({config.timezone})"
+        ),
         P("Battery: existing automatic operation. Gas heating: unavailable."),
         H3("Room control"),
         P(
-            "Room targets and AC setpoints can differ because the sensors are at different heights. Age is time since the source last reported; unchanged readings are not relabelled as fresh."
+            (
+                "External room feedback can adjust AC setpoints. "
+                if any(r.room_feedback for r in config.rooms)
+                else "ACs use their built-in thermostats without external temperature corrections. "
+            )
+            + "Age is time since the source last reported; unchanged readings are not relabelled as fresh."
         ),
         Table(
             Thead(

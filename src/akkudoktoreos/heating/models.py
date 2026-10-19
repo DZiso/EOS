@@ -11,7 +11,21 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
-class Room(Model):
+class ComfortRange(Model):
+    min_c: float = Field(default=19, ge=16, le=28)
+    max_c: float = Field(default=22, ge=17, le=30)
+    fallback_c: int = Field(default=20, ge=16, le=30)
+
+    @model_validator(mode="after")
+    def bounds(self) -> "ComfortRange":
+        if not self.min_c < self.max_c or not self.min_c <= self.fallback_c <= self.max_c:
+            raise ValueError("Require min_c < max_c and fallback within comfort range")
+        if self.min_c % 1 or self.max_c % 1:
+            raise ValueError("Samsung targets require integer comfort limits")
+        return self
+
+
+class Room(ComfortRange):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,47}$")
     climate_entity: str = Field(pattern=r"^climate\.[a-z0-9_]+$")
     temperature_entity: str = Field(pattern=r"^(sensor|climate)\.[a-z0-9_]+$")
@@ -25,17 +39,9 @@ class Room(Model):
     capacity_kwh_per_k: float = Field(default=2, ge=0.2, le=30)
     loss_kw_per_k: float = Field(default=0.06, ge=0, le=2)
     max_heat_kw: float = Field(default=3.2, gt=0, le=20)
-    min_c: float = Field(default=19, ge=16, le=28)
-    max_c: float = Field(default=22, ge=17, le=30)
-    fallback_c: int = Field(default=20, ge=16, le=30)
-
-    @model_validator(mode="after")
-    def bounds(self) -> "Room":
-        if not self.min_c < self.max_c or not self.min_c <= self.fallback_c <= self.max_c:
-            raise ValueError("Require min_c < max_c and fallback within comfort range")
-        if self.min_c % 1 or self.max_c % 1:
-            raise ValueError("Samsung targets require integer comfort limits")
-        return self
+    night_comfort: ComfortRange | None = Field(
+        default=None, description="Optional comfort range during the configured quiet hours."
+    )
 
 
 class Coupling(Model):
@@ -144,7 +150,8 @@ class HeatingSettings(Model):
                 )
         if self.enabled and not self.rooms:
             raise ValueError("Enabled heating needs rooms")
-        if any(r.max_c - r.min_c <= 2 * self.comfort_margin_c for r in self.rooms):
+        ranges = [band for r in self.rooms for band in (r, r.night_comfort) if band is not None]
+        if any(band.max_c - band.min_c <= 2 * self.comfort_margin_c for band in ranges):
             raise ValueError("Comfort margin leaves no usable temperature range")
         if self.mode == "control" and not self.control_switch_entity:
             raise ValueError("Control needs a Home Assistant enable switch")

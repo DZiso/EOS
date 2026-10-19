@@ -93,6 +93,20 @@ thermal model. Each room uses `fallback_c` as its normal room target, bounded by
 the comfort margin. Missing forecasts or a missing sensor in another room do not
 stop a healthy room's thermostat.
 
+For native AC thermostat control, use `room_feedback: false`, set
+`temperature_entity` to the AC's climate entity and `temperature_attribute` to
+`current_temperature`. The automatic setpoint stays inside the comfort range;
+no external sensor correction is added.
+
+A room can have a separate `night_comfort`, for example
+`{"min_c": 18, "max_c": 20, "fallback_c": 19}`. This applies during
+`quiet_start_hour`–`quiet_end_hour` in the configured timezone (including daylight
+saving changes). Outside that window the room's usual limits and fallback apply.
+Both the planner and controller use these limits, including when forecasts or
+temperature reports are missing. The planner splits blocks at the transition;
+an old daytime target hold cannot delay the night limit. Manual overrides retain
+their configured expiry across the transition.
+
 Set `room_feedback: true` for an occupied-room sensor below the indoor head. The
 controller seeds a bounded AC setpoint offset from the head/room difference, then
 adjusts it by at most 0.5°C after a new room report and a 30-minute held demand.

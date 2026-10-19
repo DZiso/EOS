@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from akkudoktoreos.core import coreabc
 from akkudoktoreos.heating import runtime
 from akkudoktoreos.heating.controller import commands, temperature_status
-from akkudoktoreos.heating.models import Compressor, HeatingSettings, Room
+from akkudoktoreos.heating.models import ComfortRange, Compressor, HeatingSettings, Room
 from akkudoktoreos.server.rest.heating import router
 
 NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
@@ -252,3 +252,53 @@ def test_three_hour_override_expires_and_control_resumes_after_memory_reload():
     calls=[c for c in commands(cfg,None,states,after_expiry,restored,decisions) if c['data']['entity_id']=='climate.room']
     assert calls and decisions['room']['state']=='active'
     assert decisions['room']['room_target_c']==21
+
+
+@pytest.mark.parametrize('forecast', [False, True])
+def test_native_night_band_overrides_a_recent_day_target_hold_and_returns_by_day(forecast):
+    cfg, states, memory = setup_control()
+    room = cfg.rooms[1]
+    room.night_comfort = ComfortRange(min_c=18, max_c=20, fallback_c=19)
+    cfg.optimization_enabled = forecast
+    cfg.allow_estimated_model_control = forecast
+    night = datetime.fromisoformat('2026-10-19T20:00:00+00:00')  # 22:00 Berlin
+    before = night - timedelta(minutes=1)
+    states['sensor.other'].update(state='19', last_reported=before.isoformat())
+    proposal = {'feasible': True, 'generated_at': before.isoformat(),
+                'slots': [{'at': before.isoformat(), 'targets_c': {'other': 22}}]}
+    acknowledge(states, commands(cfg, proposal, states, before, memory))
+    assert states['climate.other']['attributes']['temperature'] == (22 if forecast else 21)
+    # Persisted ownership and a still-fresh daytime plan must not hold a high target at night.
+    memory = json.loads(json.dumps(memory))
+    decisions: dict[str, Any] = {}
+    acknowledge(states, commands(cfg, proposal, states, night, memory, decisions))
+    assert states['climate.other']['attributes']['temperature'] == (20 if forecast else 19)
+    assert states['climate.other']['attributes']['preset_mode'] == 'quiet'
+    assert decisions['other']['setpoint_offset_c'] == 0
+    # Even with a stale temperature and expired forecast, the time-based fallback works.
+    morning = datetime.fromisoformat('2026-10-20T05:00:00+00:00')
+    acknowledge(states, commands(cfg, proposal, states, morning, memory, decisions))
+    assert states['climate.other']['attributes']['temperature'] == 21
+    assert states['climate.other']['attributes']['preset_mode'] == 'none'
+
+
+def test_disabling_feedback_releases_old_corrected_target_despite_hold():
+    cfg, states, memory = setup_control()
+    acknowledge(states, commands(cfg, None, states, NOW, memory))
+    assert states['climate.room']['attributes']['temperature'] == 25
+    cfg.rooms[0].room_feedback = False
+    cfg.optimization_enabled = cfg.allow_estimated_model_control = True
+    later = NOW + timedelta(minutes=1)
+    proposal = {'feasible': True, 'generated_at': later.isoformat(),
+                'slots': [{'at': later.isoformat(), 'targets_c': {'room': 21}}]}
+    acknowledge(states, commands(cfg, proposal, states, later, memory))
+    assert states['climate.room']['attributes']['temperature'] <= 22
+
+
+def test_manual_override_is_preserved_across_night_boundary():
+    cfg, states, memory = setup_control()
+    cfg.rooms[1].night_comfort = ComfortRange(min_c=18, max_c=20, fallback_c=19)
+    night = datetime.fromisoformat('2026-10-19T20:00:00+00:00')
+    memory['climate.other'] = {'override_until': night.timestamp() + 3600}
+    assert not [c for c in commands(cfg, None, states, night, memory)
+                if c['data']['entity_id'] == 'climate.other']

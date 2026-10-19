@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from akkudoktoreos.heating.models import HeatingSettings, Room
-from akkudoktoreos.heating.planner import quiet_at
+from akkudoktoreos.heating.planner import comfort_at, quiet_at
 
 
 def parse_time(value: str) -> datetime:
@@ -206,16 +206,20 @@ def commands(
         if not reading["usable"] and room.room_feedback and not lease.get("expected"):
             decision["state"] = "waiting_for_temperature"
             continue
+        band = comfort_at(settings, room, now)
+        comfort_key = [band.min_c, band.max_c, band.fallback_c]
+        band_changed = lease.get("comfort_range") != comfort_key
+        lease["comfort_range"] = comfort_key
         room_target = (
-            room.fallback_c
+            band.fallback_c
             if slot is None
-            else slot.get("targets_c", {}).get(room.id, room.fallback_c)
+            else slot.get("targets_c", {}).get(room.id, band.fallback_c)
         )
         if not isinstance(room_target, (float, int)) or not math.isfinite(room_target):
-            room_target = room.fallback_c
+            room_target = band.fallback_c
         room_target = min(
-            room.max_c - settings.comfort_margin_c,
-            max(room.min_c + settings.comfort_margin_c, room_target),
+            band.max_c - settings.comfort_margin_c,
+            max(band.min_c + settings.comfort_margin_c, room_target),
         )
         temperature = reading.get("temperature_c") if reading["usable"] else None
         decision.update(
@@ -225,10 +229,10 @@ def commands(
             # Stop using a corrected high setpoint when the room sensor is lost.
             # Native thermostats need no remote temperature report. A room with
             # external feedback must already be owned before using this fallback.
-            target = room.fallback_c
+            target = band.fallback_c
             decision.update(state="device_fallback", source="device_thermostat")
         else:
-            if room.room_feedback and temperature >= room.max_c - settings.comfort_margin_c:
+            if room.room_feedback and temperature >= band.max_c - settings.comfort_margin_c:
                 lease["comfort_paused"] = True
             elif not room.room_feedback or temperature <= room_target - 0.3:
                 lease["comfort_paused"] = False
@@ -277,8 +281,9 @@ def commands(
         target = int(max(minimum, min(maximum, target)))
         urgent = (
             temperature is None
-            or temperature < room.min_c
-            or temperature >= room.max_c - settings.comfort_margin_c
+            or temperature < band.min_c
+            or temperature >= band.max_c - settings.comfort_margin_c
+            or band_changed
         )
         hold = room.feedback_interval_seconds if room.room_feedback else settings.block_minutes * 60
         if (
@@ -287,6 +292,10 @@ def commands(
             and now.timestamp() - lease.get("last_change", 0) < hold
         ):
             target = signature.get("temperature") or target
+        if not room.room_feedback:
+            # Never carry a previous high target into a lower native comfort band.
+            # This also releases persisted offsets when external feedback is disabled.
+            target = int(max(minimum, min(maximum, max(band.min_c, min(band.max_c, target)))))
         desired_preset = "quiet" if quiet else "none"
         wanted = {"hvac_mode": "heat", "temperature": target, "preset_mode": desired_preset}
         decision.update(ac_target_c=target, hvac_mode="heat", preset=desired_preset)

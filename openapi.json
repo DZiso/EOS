@@ -4286,6 +4286,34 @@
         "title": "CacheCommonSettings",
         "description": "Cache Configuration."
       },
+      "ComfortRange": {
+        "properties": {
+          "min_c": {
+            "type": "number",
+            "maximum": 28.0,
+            "minimum": 16.0,
+            "title": "Min C",
+            "default": 19
+          },
+          "max_c": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 17.0,
+            "title": "Max C",
+            "default": 22
+          },
+          "fallback_c": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 16.0,
+            "title": "Fallback C",
+            "default": 20
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ComfortRange"
+      },
       "CommodityQuantity": {
         "type": "string",
         "enum": [
@@ -15969,6 +15997,27 @@
       },
       "Room": {
         "properties": {
+          "min_c": {
+            "type": "number",
+            "maximum": 28.0,
+            "minimum": 16.0,
+            "title": "Min C",
+            "default": 19
+          },
+          "max_c": {
+            "type": "number",
+            "maximum": 30.0,
+            "minimum": 17.0,
+            "title": "Max C",
+            "default": 22
+          },
+          "fallback_c": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 16.0,
+            "title": "Fallback C",
+            "default": 20
+          },
           "id": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9_]{0,47}$",
@@ -16067,26 +16116,16 @@
             "title": "Max Heat Kw",
             "default": 3.2
           },
-          "min_c": {
-            "type": "number",
-            "maximum": 28.0,
-            "minimum": 16.0,
-            "title": "Min C",
-            "default": 19
-          },
-          "max_c": {
-            "type": "number",
-            "maximum": 30.0,
-            "minimum": 17.0,
-            "title": "Max C",
-            "default": 22
-          },
-          "fallback_c": {
-            "type": "integer",
-            "maximum": 30.0,
-            "minimum": 16.0,
-            "title": "Fallback C",
-            "default": 20
+          "night_comfort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComfortRange"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional comfort range during the configured quiet hours."
           }
         },
         "additionalProperties": false,

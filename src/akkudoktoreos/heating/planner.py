@@ -10,7 +10,12 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from akkudoktoreos.heating.models import HeatingSettings, PlanningInput
+from akkudoktoreos.heating.models import (
+    ComfortRange,
+    HeatingSettings,
+    PlanningInput,
+    Room,
+)
 
 
 def in_window(hour: int, start: int, end: int) -> bool:
@@ -25,6 +30,27 @@ def quiet_at(settings: HeatingSettings, at: datetime) -> bool:
         settings.quiet_start_hour,
         settings.quiet_end_hour,
     )
+
+
+def comfort_at(settings: HeatingSettings, room: Room, at: datetime) -> ComfortRange:
+    return room.night_comfort if room.night_comfort and quiet_at(settings, at) else room
+
+
+def control_blocks(settings: HeatingSettings, data: PlanningInput) -> list[int]:
+    """Split target holds at night/day boundaries, including unaligned horizons."""
+    indices: list[int] = []
+    block = -1
+    start = 0
+    previous_night = None
+    scheduled = any(r.night_comfort is not None for r in settings.rooms)
+    for step, slot in enumerate(data.slots):
+        night = quiet_at(settings, slot.at) if scheduled else False
+        if step == 0 or step - start >= settings.block_minutes // 15 or night != previous_night:
+            block += 1
+            start = step
+        indices.append(block)
+        previous_night = night
+    return indices
 
 
 def tariff_at(settings: HeatingSettings, at: datetime) -> float:
@@ -49,10 +75,11 @@ def simulate(
     initial_stored = stored
     cost = violation = heating_kwh = imported = exported = 0.0
     records = []
-    steps_per_block = settings.block_minutes // 15
+    blocks = control_blocks(settings, data)
     for step, slot in enumerate(data.slots):
-        target = targets[step // steps_per_block]
+        target = targets[blocks[step]]
         quiet = quiet_at(settings, slot.at)
+        bands = [comfort_at(settings, r, slot.at) for r in rooms]
         slot_electric = 0.0
         group_energy = {g.id: 0.0 for g in settings.compressors}
         # Five-minute substeps reduce thermostat overshoot and numerical error.
@@ -101,8 +128,8 @@ def simulate(
                 slot_electric += electric * dt
             for i, room in enumerate(rooms):
                 temperatures[i] += (flows[i] + heat[i]) * dt / room.capacity_kwh_per_k
-                low = room.min_c + settings.comfort_margin_c
-                high = room.max_c - settings.comfort_margin_c
+                low = bands[i].min_c + settings.comfort_margin_c
+                high = bands[i].max_c - settings.comfort_margin_c
                 violation += (
                     max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - high)
                 ) * dt
@@ -152,7 +179,11 @@ def simulate(
     # horizon ending with a deliberately cold house or an artificially empty battery.
     replacement = max(0, min(s.import_price_per_kwh for s in data.slots))
     thermal_value = (
-        sum(max(0, temperatures[i] - r.min_c) * r.capacity_kwh_per_k for i, r in enumerate(rooms))
+        sum(
+            max(0, temperatures[i] - comfort_at(settings, r, data.slots[-1].at).min_c)
+            * r.capacity_kwh_per_k
+            for i, r in enumerate(rooms)
+        )
         * replacement
         / 3
     )
@@ -185,9 +216,11 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
         raise ValueError("Battery SoC is required; missing does not mean empty")
     if len(data.slots) != settings.horizon_hours * 4:
         raise ValueError("Forecast length must match the configured horizon")
-    block_size = settings.block_minutes // 15
-    count = math.ceil(len(data.slots) / block_size)
-    fallback = [[r.fallback_c for r in settings.rooms] for _ in range(count)]
+    blocks = control_blocks(settings, data)
+    starts = [i for i, block in enumerate(blocks) if i == 0 or block != blocks[i - 1]]
+    bands = [[comfort_at(settings, r, data.slots[i].at) for r in settings.rooms] for i in starts]
+    count = len(starts)
+    fallback = [[band.fallback_c for band in row] for row in bands]
     targets = [row[:] for row in fallback]
     baseline = simulate(settings, data, fallback)
     best = baseline
@@ -203,7 +236,8 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
         for block in range(count - 1, -1, -1):
             for i, room in enumerate(settings.rooms):
                 original = chosen = targets[block][i]
-                for value in range(math.ceil(room.min_c), math.floor(room.max_c) + 1):
+                band = bands[block][i]
+                for value in range(math.ceil(band.min_c), math.floor(band.max_c) + 1):
                     if value == original:
                         continue
                     targets[block][i] = value

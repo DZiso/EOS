@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from akkudoktoreos.heating.controller import commands, read_number, read_temperatures
 from akkudoktoreos.heating.models import (
     Battery,
+    ComfortRange,
     Compressor,
     Coupling,
     ForecastSlot,
@@ -19,7 +20,13 @@ from akkudoktoreos.heating.models import (
     PlanningInput,
     Room,
 )
-from akkudoktoreos.heating.planner import plan, quiet_at, simulate, tariff_at
+from akkudoktoreos.heating.planner import (
+    comfort_at,
+    plan,
+    quiet_at,
+    simulate,
+    tariff_at,
+)
 from akkudoktoreos.heating.runtime import interpolate
 from akkudoktoreos.server.rest.heating import router
 
@@ -307,3 +314,40 @@ def test_api_runs_plan_and_rejects_invalid_input():
     assert response.json()["gas_available"] is False
     response = client.post("/v1/heating/plan", json={"settings": {}, "inputs": {}})
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    'stamp,night',
+    [('2026-10-19T19:59:59+00:00', False), ('2026-10-19T20:00:00+00:00', True),
+     ('2026-10-20T04:59:59+00:00', True), ('2026-10-20T05:00:00+00:00', False),
+     ('2026-10-25T00:30:00+00:00', True), ('2026-10-25T01:30:00+00:00', True),
+     ('2026-10-25T06:00:00+00:00', False), ('2026-03-29T05:00:00+00:00', False)],
+)
+def test_night_comfort_uses_local_clock_including_dst(stamp, night):
+    cfg = config()
+    room = cfg.rooms[0]
+    room.night_comfort = ComfortRange(min_c=18, max_c=20, fallback_c=19)
+    band = comfort_at(cfg, room, datetime.fromisoformat(stamp))
+    assert (band.min_c, band.max_c) == ((18, 20) if night else (19, 22))
+
+
+@pytest.mark.parametrize('start', ['2026-10-19T19:45:00+00:00', '2026-10-20T04:45:00+00:00'])
+def test_optimizer_splits_unaligned_blocks_at_night_and_day_boundaries(start):
+    cfg = config()
+    cfg.rooms[0].night_comfort = ComfortRange(min_c=18, max_c=20, fallback_c=19)
+    output = plan(cfg, inputs(cfg, datetime.fromisoformat(start)))
+    assert len(output['slots']) == 24
+    for slot in output['slots']:
+        night = quiet_at(cfg, datetime.fromisoformat(slot['at']))
+        assert (18 if night else 19) <= slot['targets_c']['living'] <= (20 if night else 22)
+        assert 19 <= slot['targets_c']['office'] <= 22
+
+
+def test_invalid_night_range_and_margin_are_rejected():
+    with pytest.raises(ValidationError, match='fallback'):
+        ComfortRange(min_c=18, max_c=20, fallback_c=21)
+    cfg = config().model_dump()
+    cfg['rooms'][0]['night_comfort'] = {'min_c':18, 'max_c':19, 'fallback_c':19}
+    cfg['comfort_margin_c'] = 0.5
+    with pytest.raises(ValidationError, match='margin'):
+        HeatingSettings.model_validate(cfg)
