@@ -60,7 +60,8 @@ def setup(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_state", ["missing", "stale", "unavailable", "NaN", "101", "-1", "future"])
-async def test_uncertain_battery_keeps_tariff_planning_without_solar(tmp_path, monkeypatch, bad_state):
+@pytest.mark.parametrize("solar_available", [False, True])
+async def test_uncertain_battery_keeps_valid_solar_or_uses_tariff_only(tmp_path, monkeypatch, bad_state, solar_available):
     cfg, fake, states = setup(tmp_path, monkeypatch)
     cfg.battery = Battery(soc_entity="sensor.battery")
     now = datetime.now(timezone.utc)
@@ -71,10 +72,11 @@ async def test_uncertain_battery_keeps_tariff_planning_without_solar(tmp_path, m
             "state": "9" if bad_state in ("stale", "future") else bad_state,
             "last_reported": stamp.isoformat(),
         }
-    async def weather_only(key, at):
-        assert key == "weather_temp_air", "uncertain battery must not depend on a PV forecast"
-        return [(at.timestamp()-3600+i*3600, 8) for i in range(10)]
-    monkeypatch.setattr(runtime, "forecast_points", weather_only)
+    async def forecast(key, at):
+        if key == "pvforecast_ac_power" and not solar_available:
+            raise ValueError("PV forecast stale")
+        return [(at.timestamp()-3600+i*3600, 8 if key == "weather_temp_air" else 2000) for i in range(10)]
+    monkeypatch.setattr(runtime, "forecast_points", forecast)
     await runtime.heating_tick()
     status = runtime.load_json(tmp_path / "heating/status.json", {})
     data = runtime.load_json(tmp_path / "heating/input.json", {})
@@ -82,9 +84,9 @@ async def test_uncertain_battery_keeps_tariff_planning_without_solar(tmp_path, m
     assert status["plan_fresh"] and status["planning_error"] is None
     assert status["battery"]["state"] == "uncertain"
     assert status["battery"]["measurements"]["soc"]["source_at"] == (None if bad_state == "missing" else stamp.isoformat())
-    assert data["energy_mode"] == proposal["energy_mode"] == "tariff_only"
+    assert status["energy_mode"] == data["energy_mode"] == proposal["energy_mode"] == ("solar_only" if solar_available else "tariff_only")
     assert data["battery_soc"] is None
-    assert all(s["pv_kw"] == 0 for s in data["slots"])
+    assert all(s["pv_kw"] == (2 if solar_available else 0) for s in data["slots"])
     assert all(s["battery_soc"] is None and s["battery_discharge_kwh"] == s["battery_charge_kwh"] == s["grid_export_kwh"] == 0 for s in proposal["slots"])
     fake.apply.assert_not_called()
 
@@ -99,11 +101,11 @@ async def test_battery_loss_and_recovery_replan_immediately_and_survive_restart(
     assert runtime.load_json(tmp_path / "heating/plan.json", {})["energy_mode"] == "full"
     states["sensor.battery"]["state"] = "unavailable"
     await runtime.heating_tick()  # No clock advance or planning-interval reset.
-    assert runtime.load_json(tmp_path / "heating/plan.json", {})["energy_mode"] == "tariff_only"
+    assert runtime.load_json(tmp_path / "heating/plan.json", {})["energy_mode"] == "solar_only"
     monkeypatch.setattr(runtime, "_last_planning_mode", None)
     monkeypatch.setattr(runtime, "_last_plan_attempt", 0)
     await runtime.heating_tick()  # Restart with the persisted plan and uncertain data.
-    assert runtime.load_json(tmp_path / "heating/status.json", {})["energy_mode"] == "tariff_only"
+    assert runtime.load_json(tmp_path / "heating/status.json", {})["energy_mode"] == "solar_only"
     states["sensor.battery"] = {"state":"12", "last_reported":now.isoformat()}
     await runtime.heating_tick()
     assert runtime.load_json(tmp_path / "heating/plan.json", {})["energy_mode"] == "full"
@@ -123,24 +125,25 @@ async def test_failed_fallback_replan_cannot_use_previous_full_plan_or_retry_eac
     await runtime.heating_tick()
     await runtime.heating_tick()
     status = runtime.load_json(tmp_path / "heating/status.json", {})
-    assert not status["plan_fresh"] and status["energy_mode"] == "tariff_only"
+    assert not status["plan_fresh"] and status["energy_mode"] == "solar_only"
     assert forecast.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_stale_configured_battery_limit_also_selects_tariff_only(tmp_path, monkeypatch):
+async def test_stale_configured_battery_limit_keeps_solar_without_storage(tmp_path, monkeypatch):
     cfg, fake, states = setup(tmp_path, monkeypatch)
     cfg.battery = Battery(soc_entity="sensor.battery", charge_limit_entity="number.charge_limit")
     now = datetime.now(timezone.utc)
     states["sensor.battery"] = {"state":"50", "last_reported":now.isoformat()}
     states["number.charge_limit"] = {"state":"1200", "last_reported":(now-timedelta(days=1)).isoformat()}
     data = await runtime.planning_input(cfg, states, now)
-    assert data.energy_mode == "tariff_only" and data.battery_soc is None
+    assert data.energy_mode == "solar_only" and data.battery_soc is None
     assert "number.charge_limit" in data.warnings[-1]
 
 
 @pytest.mark.asyncio
-async def test_tariff_only_plan_still_controls_native_thermostat_inside_night_band(tmp_path, monkeypatch):
+@pytest.mark.parametrize("solar_available", [False, True])
+async def test_plan_without_battery_still_controls_native_thermostat_inside_night_band(tmp_path, monkeypatch, solar_available):
     cfg, fake, states = setup(tmp_path, monkeypatch)
     cfg.battery = Battery(soc_entity="sensor.missing")
     cfg.mode = "control"
@@ -151,15 +154,73 @@ async def test_tariff_only_plan_still_controls_native_thermostat_inside_night_ba
     states["input_boolean.enable"] = {"state":"on"}
     states["sensor.room"]["state"] = "19.5"
     states["climate.room"]["state"] = "off"
+    if not solar_available:
+        forecast = runtime.forecast_points
+        async def weather_only(key, at):
+            if key == "pvforecast_ac_power":
+                raise ValueError("PV forecast unavailable")
+            return await forecast(key, at)
+        monkeypatch.setattr(runtime, "forecast_points", weather_only)
     await runtime.heating_tick()
     status = runtime.load_json(tmp_path / "heating/status.json", {})
-    assert status["energy_mode"] == "tariff_only"
+    assert status["energy_mode"] == ("solar_only" if solar_available else "tariff_only")
     assert status["plan_fresh"] and status["rooms"]["room"]["source"] == "eos"
     assert status["rooms"]["room"]["preset"] == "quiet"
     assert 18 <= status["rooms"]["room"]["ac_target_c"] <= 20
     assert status["rooms"]["room"]["setpoint_offset_c"] == 0
     assert status["commands_confirmed"] == 3
     assert all(c["domain"] == "climate" for c in fake.apply.call_args.args[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("solar", [[], [(0, 1000)], [(0, 1000), (14400, 1000)]])
+async def test_incomplete_solar_horizon_receives_no_partial_credit(tmp_path, monkeypatch, solar):
+    cfg, _, states = setup(tmp_path, monkeypatch)
+    cfg.battery = Battery(soc_entity="sensor.missing")
+    forecast = runtime.forecast_points
+    async def incomplete(key, at):
+        if key == "pvforecast_ac_power":
+            return [(at.timestamp() + offset, watts) for offset, watts in solar]
+        return await forecast(key, at)
+    monkeypatch.setattr(runtime, "forecast_points", incomplete)
+    data = await runtime.planning_input(cfg, states, datetime.now(timezone.utc))
+    assert data.energy_mode == "tariff_only"
+    assert all(s.pv_kw == 0 for s in data.slots)
+    assert any("Solar forecast unavailable" in w for w in data.warnings)
+
+
+@pytest.mark.asyncio
+async def test_solar_recovers_without_waiting_for_battery_or_retrying_each_tick(tmp_path, monkeypatch):
+    cfg, _, states = setup(tmp_path, monkeypatch)
+    cfg.battery = Battery(soc_entity="sensor.missing")
+    forecast = runtime.forecast_points
+    solar_available = False
+    async def recovering(key, at):
+        if key == "pvforecast_ac_power":
+            if not solar_available:
+                raise ValueError("PV stale")
+            return [(at.timestamp()-3600+i*3600, 1500) for i in range(10)]
+        return await forecast(key, at)
+    spy = AsyncMock(side_effect=recovering)
+    monkeypatch.setattr(runtime, "forecast_points", spy)
+    await runtime.heating_tick()
+    first = runtime.load_json(tmp_path / "heating/plan.json", {})
+    assert first["energy_mode"] == "tariff_only"
+    solar_available = True
+    await runtime.heating_tick()
+    assert spy.await_count == 2  # Weather and PV once, no control-tick retry.
+    monkeypatch.setattr(runtime, "_last_plan_attempt", datetime.now(timezone.utc).timestamp() - 301)
+    await runtime.heating_tick()
+    status = runtime.load_json(tmp_path / "heating/status.json", {})
+    assert status["energy_mode"] == "solar_only" and status["plan_fresh"]
+    assert status["battery"]["state"] == "uncertain"
+    assert spy.await_count == 4
+    solar_available = False
+    monkeypatch.setattr(runtime, "_last_plan_attempt", 0)
+    await runtime.heating_tick()
+    status = runtime.load_json(tmp_path / "heating/status.json", {})
+    assert status["energy_mode"] == "tariff_only" and status["plan_fresh"]
+    assert runtime.load_json(tmp_path / "heating/plan.json", {})["generated_at"] != first["generated_at"]
 
 
 @pytest.mark.asyncio

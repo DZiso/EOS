@@ -81,8 +81,12 @@ Observation records only configured telemetry once per minute, retaining 30 days
 of daily JSONL files under `/data/heating`, and plans every 15 minutes. Source
 timestamps distinguish unchanged values from fresh readings. Missing/stale room
 temperatures or weather forecasts block a new plan. Uncertain battery SoC or
-configured battery limits select tariff-only planning: no battery contribution,
-solar generation or export revenue is assumed, and no solar forecast is needed.
+configured battery limits select solar-only planning when the independently
+validated PV forecast covers the horizon: tariffs and direct PV consumption still
+count, but battery contribution and export revenue do not. Surplus PV has an unknown
+destination and is reported as `unallocated_pv_kwh`, not credited as storage or export.
+If that solar forecast is also unavailable, stale or incomplete, tariff-only
+planning prices all electricity as grid imports and retries PV every five minutes.
 Missing SoC stays unknown; it is never rewritten as a measured zero. A fresh,
 valid battery report automatically restores full planning on the next control
 cycle, without waiting for the normal planning interval. Mode changes invalidate
@@ -92,7 +96,7 @@ The Heating tab displays freshness, targets, predictions, estimates and warnings
 **Follow-up: monitor Zendure connection history during daylight and solar
 charging for intermittent disconnections.** Zendure can suppress unchanged HA
 sensor writes, so an old charge value can mean either idle operation or lost
-communication. Tariff-only operation must not hide genuine daytime outages.
+communication. Planning without battery credit must not hide genuine daytime outages.
 Runtime status and observation logs retain the battery source timestamp, age,
 last reported value, uncertainty reason and selected planning mode. Compare these
 with Zendure's connection history; its status codes also represent operating

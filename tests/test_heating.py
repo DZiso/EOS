@@ -172,6 +172,38 @@ def test_tariff_only_plan_ignores_solar_and_battery_credit_even_when_supplied():
         assert slot["grid_import_kwh"] == pytest.approx(0.3*0.25 + slot["heating_kwh"])
 
 
+@pytest.mark.parametrize("pv", [0, 0.4, 20])
+def test_solar_only_uses_direct_pv_without_battery_or_export_credit(pv):
+    cfg = config(battery=Battery())
+    data = inputs(cfg, pv=pv, soc=0.8)
+    data.energy_mode = "solar_only"
+    result = plan(cfg, data)
+    assert result["energy_mode"] == "solar_only"
+    expected_cost = 0.0
+    for slot, source in zip(result["slots"], data.slots):
+        assert slot["battery_soc"] is None
+        assert slot["battery_charge_kwh"] == slot["battery_discharge_kwh"] == slot["grid_export_kwh"] == 0
+        net = (source.baseline_kw - source.pv_kw) * 0.25 + slot["heating_kwh"]
+        assert slot["grid_import_kwh"] == pytest.approx(max(0, net))
+        assert slot["unallocated_pv_kwh"] == pytest.approx(max(0, -net))
+        expected_cost += max(0, net) * source.import_price_per_kwh
+    assert result["estimated_cost"] == pytest.approx(expected_cost)
+
+
+def test_solar_only_changes_schedule_to_use_sun_and_lowers_grid_import():
+    cfg = config(battery=Battery(), horizon_hours=12)
+    data = inputs(cfg, at=datetime(2026, 1, 15, 7, tzinfo=timezone.utc), outside=8)
+    data.energy_mode = "solar_only"
+    sunny = data.model_copy(deep=True)
+    for slot in sunny.slots[8:24]:
+        slot.pv_kw = 4
+    with_sun, without_sun = plan(cfg, sunny), plan(cfg, data)
+    assert with_sun["feasible"] and without_sun["feasible"]
+    assert with_sun["estimated_cost"] < without_sun["estimated_cost"]
+    assert sum(s["grid_import_kwh"] for s in with_sun["slots"]) < sum(s["grid_import_kwh"] for s in without_sun["slots"])
+    assert [s["targets_c"] for s in with_sun["slots"]] != [s["targets_c"] for s in without_sun["slots"]]
+
+
 @pytest.mark.parametrize(
     "stamp,cheap",
     [

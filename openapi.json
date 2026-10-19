@@ -15780,6 +15780,7 @@
             "type": "string",
             "enum": [
               "full",
+              "solar_only",
               "tariff_only"
             ],
             "title": "Energy Mode",

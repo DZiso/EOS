@@ -297,36 +297,48 @@ async def planning_input(
     ]
     battery = config.battery
     report = battery_status(config, states, now)
-    tariff_only = not report["usable"]
-    if tariff_only:
+    battery_uncertain = not report["usable"]
+    if battery_uncertain:
         # TODO: Monitor Zendure connection-status history during daylight/solar
         # charging for intermittent disconnects. This fallback must not hide them:
         # an old SoC can mean either normal idle operation or lost communication.
         # Keep its real timestamp and uncertainty visible; never refresh cached data.
-        warnings.append("Battery data uncertain; tariff-only planning. " + report["error"])
+        warnings.append("Battery data uncertain; no battery savings assumed. " + report["error"])
     elif battery:
         values = report["values"]
         soc = values["soc"]
         updates = {key: value for key, value in values.items() if key != "soc"}
         config.battery = type(battery).model_validate({**battery.model_dump(), **updates})
     outside = await forecast_points("weather_temp_air", now)
-    solar = [] if tariff_only else await forecast_points("pvforecast_ac_power", now)
-    # Extend sunrise/sunset zeroes only to boundaries of forecast-covered days.
-    local_zone = ZoneInfo(config.timezone)
-    if solar and solar[0][1] == 0:
-        first_day = datetime.fromtimestamp(solar[0][0], local_zone).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        if first_day.timestamp() < solar[0][0]:
-            solar.insert(0, (first_day.timestamp(), 0))
-    if solar and solar[-1][1] == 0:
-        next_day = datetime.fromtimestamp(solar[-1][0], local_zone).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(days=1)
-        if next_day.timestamp() > solar[-1][0]:
-            solar.append((next_day.timestamp(), 0))
     # UTC arithmetic creates 96 real quarter-hours even across DST transitions.
     start = datetime.fromtimestamp(math.floor(now.timestamp() / 900) * 900, timezone.utc)
+    solar_powers = None
+    try:
+        solar = await forecast_points("pvforecast_ac_power", now)
+        # Extend sunrise/sunset zeroes only to boundaries of forecast-covered days.
+        local_zone = ZoneInfo(config.timezone)
+        if solar and solar[0][1] == 0:
+            first_day = datetime.fromtimestamp(solar[0][0], local_zone).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            if first_day.timestamp() < solar[0][0]:
+                solar.insert(0, (first_day.timestamp(), 0))
+        if solar and solar[-1][1] == 0:
+            next_day = datetime.fromtimestamp(solar[-1][0], local_zone).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) + timedelta(days=1)
+            if next_day.timestamp() > solar[-1][0]:
+                solar.append((next_day.timestamp(), 0))
+        # Validate the entire horizon before granting any direct solar credit.
+        solar_powers = [
+            max(0, interpolate(solar, (start + timedelta(minutes=15 * i)).timestamp(), solar=True))
+            / 1000
+            for i in range(config.horizon_hours * 4)
+        ]
+    except Exception as exc:
+        if not battery_uncertain:
+            raise
+        warnings.append("Solar forecast unavailable; tariff-only planning. " + safe_error(exc))
     slots = []
     for i in range(config.horizon_hours * 4):
         at = start + timedelta(minutes=15 * i)
@@ -334,9 +346,7 @@ async def planning_input(
             ForecastSlot(
                 at=at,
                 outside_c=interpolate(outside, at.timestamp()),
-                pv_kw=0
-                if tariff_only
-                else max(0, interpolate(solar, at.timestamp(), solar=True)) / 1000,
+                pv_kw=solar_powers[i] if solar_powers is not None else 0,
                 baseline_kw=config.baseline_kw,
                 import_price_per_kwh=tariff_at(config, at),
                 export_price_per_kwh=config.export_price_per_kwh,
@@ -346,7 +356,13 @@ async def planning_input(
         generated_at=now,
         temperatures_c=temperatures,
         battery_soc=soc,
-        energy_mode="tariff_only" if tariff_only else "full",
+        energy_mode=(
+            "full"
+            if not battery_uncertain
+            else "solar_only"
+            if solar_powers is not None
+            else "tariff_only"
+        ),
         slots=slots,
         warnings=warnings,
     )
@@ -454,17 +470,30 @@ async def heating_tick() -> None:
                 room: item["temperature_c"] for room, item in readings.items() if item["usable"]
             }
             status["battery"] = battery_status(config, states, now)
-            energy_mode = "full" if status["battery"]["usable"] else "tariff_only"
+            # Battery changes invalidate incompatible plans immediately. PV is
+            # checked independently during planning; a PV outage retries in five
+            # minutes without making every control tick a forecast request.
+            requested_mode = "full" if status["battery"]["usable"] else "solar_only"
+            allowed_modes = (
+                {"full"} if status["battery"]["usable"] else {"solar_only", "tariff_only"}
+            )
+            energy_mode = requested_mode
             status["energy_mode"] = energy_mode
             # Failed forecast attempts retry at most every five minutes. Missing
             # room values still prevent optimization but never stop other rooms.
-            interval = 300 if _last_planning_error or proposal is None else 900
+            interval = (
+                300
+                if _last_planning_error
+                or proposal is None
+                or proposal.get("energy_mode") == "tariff_only"
+                else 900
+            )
             if (
                 now.timestamp() - _last_plan_attempt >= interval
-                or energy_mode != _last_planning_mode
+                or requested_mode != _last_planning_mode
             ):
                 _last_plan_attempt = now.timestamp()
-                _last_planning_mode = energy_mode
+                _last_planning_mode = requested_mode
                 try:
                     await bootstrap_forecasts(config, client)
                     inputs = await planning_input(config, states, now)
@@ -475,13 +504,16 @@ async def heating_tick() -> None:
                 except Exception as exc:
                     _last_planning_error = safe_error(exc)
                     logger.warning("Heating planning unavailable: {}", _last_planning_error)
+            if proposal and proposal.get("energy_mode", "full") in allowed_modes:
+                energy_mode = proposal.get("energy_mode", "full")
+            status["energy_mode"] = energy_mode
             status["planning_error"] = _last_planning_error
             status["last_plan_at"] = proposal.get("generated_at") if proposal else None
             fresh = bool(
                 proposal
                 and usable
                 and not _last_planning_error
-                and proposal.get("energy_mode", "full") == energy_mode
+                and proposal.get("energy_mode", "full") in allowed_modes
                 and 0
                 <= now.timestamp() - parse_time(proposal["generated_at"]).timestamp()
                 <= config.plan_max_age_seconds

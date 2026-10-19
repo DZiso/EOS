@@ -133,7 +133,7 @@ def simulate(
                 violation += (
                     max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - high)
                 ) * dt
-        pv_kw = slot.pv_kw if data.energy_mode == "full" else 0.0
+        pv_kw = slot.pv_kw if data.energy_mode != "tariff_only" else 0.0
         net = (slot.baseline_kw - pv_kw) * 0.25 + slot_electric
         battery_charge = battery_discharge = 0.0
         if battery and data.battery_soc is not None:
@@ -156,6 +156,11 @@ def simulate(
                 stored -= battery_discharge / battery.discharge_efficiency
                 net -= battery_discharge
         grid_in, grid_out = max(0.0, net), max(0.0, -net)
+        # With unknown storage, direct PV still offsets demand. The destination
+        # of any surplus is unknown: do not claim export income or stored energy.
+        pv_surplus = grid_out if data.energy_mode == "solar_only" else 0.0
+        if data.energy_mode == "solar_only":
+            grid_out = 0.0
         cost += grid_in * slot.import_price_per_kwh - grid_out * slot.export_price_per_kwh
         heating_kwh += slot_electric
         imported += grid_in
@@ -171,6 +176,7 @@ def simulate(
                     "compressor_kwh": group_energy,
                     "grid_import_kwh": grid_in,
                     "grid_export_kwh": grid_out,
+                    "unallocated_pv_kwh": pv_surplus,
                     "battery_charge_kwh": battery_charge,
                     "battery_discharge_kwh": battery_discharge,
                     "battery_soc": stored / battery.capacity_kwh if battery else None,
@@ -256,6 +262,11 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
         warnings.append(
             "Tariff-only estimate: all electricity is priced as grid import; "
             "no solar or battery savings are assumed."
+        )
+    elif data.energy_mode == "solar_only":
+        warnings.append(
+            "Solar-only estimate: tariff and direct forecast PV are used; "
+            "no battery savings or export revenue are assumed."
         )
     if not settings.validated_model:
         warnings.append(

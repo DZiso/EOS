@@ -69,6 +69,8 @@ def Heating() -> Div:
         P(
             "Energy planning: tariff only — battery data is uncertain; estimates assume grid electricity."
             if state.get("energy_mode") == "tariff_only"
+            else "Energy planning: tariff and direct solar — no battery savings or export income assumed."
+            if state.get("energy_mode") == "solar_only"
             else "Energy planning: tariff, solar and configured battery model."
         ),
         P(
