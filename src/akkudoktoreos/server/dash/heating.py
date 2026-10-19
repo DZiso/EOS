@@ -64,6 +64,14 @@ def Heating() -> Div:
             f"Runtime: {state.get('state', 'not started')} · Latest plan: {proposal.get('generated_at', 'none')}"
         ),
         P("Fresh plan" if fresh else "No fresh plan — shown schedules must not be applied"),
+        P(
+            "Plan acceptance: "
+            + (
+                proposal.get("comfort_status", "within_bounds").replace("_", " ")
+                if proposal.get("feasible")
+                else "rejected — comfort fallback"
+            )
+        ),
         P(state.get("error") or ""),
         P("Planning: " + (state.get("planning_error") or "available")),
         P(

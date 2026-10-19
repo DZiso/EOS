@@ -77,6 +77,15 @@ class Battery(Model):
     max_soc_entity: str | None = None
     charge_limit_entity: str | None = None
     discharge_limit_entity: str | None = None
+    connection_entity: str | None = Field(
+        default=None,
+        description="Optional integration status; an unhealthy state vetoes battery credit.",
+    )
+    connection_healthy_states: list[str] = Field(
+        default_factory=lambda: ["on"],
+        min_length=1,
+        description="Exact healthy states, including any valid operating-mode codes. This is not a heartbeat.",
+    )
 
     @model_validator(mode="after")
     def bounds(self) -> "Battery":

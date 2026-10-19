@@ -22,6 +22,7 @@ from akkudoktoreos.heating.models import (
 )
 from akkudoktoreos.heating.planner import (
     comfort_at,
+    control_blocks,
     plan,
     quiet_at,
     simulate,
@@ -266,6 +267,67 @@ def test_infeasible_cold_weather_is_reported():
     output = plan(cfg, inputs(cfg, outside=-20))
     assert not output["feasible"]
     assert output["comfort_violation_degree_hours"] > 0
+
+
+@pytest.mark.parametrize("energy_mode", ["full", "solar_only", "tariff_only"])
+def test_hot_office_does_not_reject_safe_coupled_recovery(energy_mode):
+    cfg = config(horizon_hours=24, battery=Battery())
+    for room in cfg.rooms:
+        room.night_comfort = ComfortRange(min_c=18,max_c=22,fallback_c=19)
+    data = inputs(cfg, at=datetime(2026,10,19,18,tzinfo=timezone.utc),
+                  temps={'living':22,'office':25},soc=0.14,outside=10)
+    data.energy_mode = energy_mode
+    output = plan(cfg,data)
+    assert output['feasible'] and output['comfort_status'] == 'recovering'
+    assert 'office' in output['recovering_rooms']
+    assert output['comfort_violation_degree_hours'] > 0
+    assert output['avoidable_comfort_violation_degree_hours'] < 1e-6
+    blocks = control_blocks(cfg,data)
+    starts = [i for i,b in enumerate(blocks) if i == 0 or b != blocks[i-1]]
+    minimum = [[int(comfort_at(cfg,r,data.slots[i].at).min_c) for r in cfg.rooms] for i in starts]
+    ceiling = simulate(cfg,data,minimum,True)['temperature_trace']
+    targets = [[output['slots'][i]['targets_c'][r.id] for r in cfg.rooms] for i in starts]
+    replay = simulate(cfg,data,targets,True)
+    for step, temperatures in enumerate(replay['temperature_trace']):
+        for i, room in enumerate(cfg.rooms):
+            band = comfort_at(cfg,room,data.slots[step//3].at)
+            assert temperatures[i] >= band.min_c - 1e-6
+            assert temperatures[i] <= max(band.max_c,ceiling[step][i]) + 1e-6
+
+
+def test_recovery_allowance_cannot_buy_avoidable_overheating_or_underheating():
+    cfg = config()
+    for room in cfg.rooms:
+        room.night_comfort = ComfortRange(min_c=18,max_c=20,fallback_c=19)
+    cfg.quiet_start_hour = cfg.quiet_end_hour = 0
+    data = inputs(cfg, temps={'living':25,'office':20})
+    for slot in data.slots: slot.import_price_per_kwh = -1
+    ceiling = simulate(cfg,data,[[18,18]]*6,True)['temperature_trace']
+    overheated = simulate(cfg,data,[[22,22]]*6,recovery_ceiling=ceiling)
+    assert overheated['avoidable_violation'] > 0
+    output = plan(cfg,data)
+    assert output['feasible']
+    assert output['avoidable_comfort_violation_degree_hours'] < 1e-6
+    cfg.compressors[0].max_heat_kw = 0.1
+    cold = plan(cfg,inputs(cfg,temps={'living':25,'office':17},outside=-20))
+    assert not cold['feasible'] and cold['comfort_status'] == 'infeasible'
+
+
+def test_night_transition_accepts_passive_cooling_and_margin_is_soft():
+    cfg = config()
+    cfg.rooms[0].night_comfort = ComfortRange(min_c=18,max_c=20,fallback_c=19)
+    cfg.rooms[1].night_comfort = ComfortRange(min_c=18,max_c=22,fallback_c=19)
+    data = inputs(cfg,at=datetime(2026,10,19,19,45,tzinfo=timezone.utc),
+                  temps={'living':21.9,'office':21},outside=8)
+    output = plan(cfg,data)
+    assert output['feasible'] and output['comfort_status'] == 'recovering'
+    assert all(s['targets_c']['living'] <= 20 for s in output['slots'][1:])
+    # Exactly the user's lower limit is admissible even with a nonzero margin.
+    cfg.quiet_start_hour = cfg.quiet_end_hour = 0
+    cold_data = inputs(cfg,temps={'living':18,'office':18})
+    at_minimum = simulate(cfg,cold_data,[[18,18]]*6)
+    assert at_minimum['violation'] == at_minimum['avoidable_violation'] == 0
+    assert any(18 in s['targets_c'].values() for s in plan(cfg,cold_data)['slots'])
 
 
 def test_solar_changes_electrical_cost():

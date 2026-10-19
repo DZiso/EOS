@@ -63,7 +63,11 @@ def tariff_at(settings: HeatingSettings, at: datetime) -> float:
 
 
 def simulate(
-    settings: HeatingSettings, data: PlanningInput, targets: list[list[int]], detail: bool = False
+    settings: HeatingSettings,
+    data: PlanningInput,
+    targets: list[list[int]],
+    detail: bool = False,
+    recovery_ceiling: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     rooms = settings.rooms
     indices = {r.id: i for i, r in enumerate(rooms)}
@@ -74,6 +78,9 @@ def simulate(
     )
     initial_stored = stored
     cost = violation = heating_kwh = imported = exported = 0.0
+    avoidable_violation = margin_violation = 0.0
+    temperature_trace = []
+    recovering_rooms: set[str] = set()
     records = []
     blocks = control_blocks(settings, data)
     for step, slot in enumerate(data.slots):
@@ -83,7 +90,7 @@ def simulate(
         slot_electric = 0.0
         group_energy = {g.id: 0.0 for g in settings.compressors}
         # Five-minute substeps reduce thermostat overshoot and numerical error.
-        for _ in range(3):
+        for substep in range(3):
             dt = 1 / 12
             flows = [
                 -r.loss_kw_per_k * (temperatures[i] - slot.outside_c) for i, r in enumerate(rooms)
@@ -128,11 +135,25 @@ def simulate(
                 slot_electric += electric * dt
             for i, room in enumerate(rooms):
                 temperatures[i] += (flows[i] + heat[i]) * dt / room.capacity_kwh_per_k
-                low = bands[i].min_c + settings.comfort_margin_c
-                high = bands[i].max_c - settings.comfort_margin_c
-                violation += (
-                    max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - high)
+                low, high = bands[i].min_c, bands[i].max_c
+                actual = max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - high)
+                ceiling = high
+                if recovery_ceiling is not None:
+                    ceiling = max(high, recovery_ceiling[step * 3 + substep][i])
+                avoidable_violation += (
+                    max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - ceiling)
                 ) * dt
+                violation += actual * dt
+                if temperatures[i] > high + 1e-6 and ceiling > high:
+                    recovering_rooms.add(room.id)
+                preferred = max(0.0, low + settings.comfort_margin_c - temperatures[i]) + max(
+                    0.0, temperatures[i] - high + settings.comfort_margin_c
+                )
+                # The interior margin is a small cost preference, never a hard
+                # comfort boundary. In particular, an 18 C minimum means 18 C.
+                margin_violation += max(0.0, preferred - actual) * dt
+            if detail:
+                temperature_trace.append(temperatures[:])
         pv_kw = slot.pv_kw if data.energy_mode != "tariff_only" else 0.0
         net = (slot.baseline_kw - pv_kw) * 0.25 + slot_electric
         battery_charge = battery_discharge = 0.0
@@ -200,11 +221,14 @@ def simulate(
     changes = sum(
         sum(a != b for a, b in zip(targets[i - 1], targets[i])) for i in range(1, len(targets))
     )
-    objective = cost - thermal_value - battery_value + changes * 0.002
+    objective = cost - thermal_value - battery_value + changes * 0.002 + margin_violation * 0.01
     return {
         "cost": cost,
         "objective": objective,
         "violation": violation,
+        "avoidable_violation": avoidable_violation,
+        "recovering_rooms": sorted(recovering_rooms),
+        "temperature_trace": temperature_trace,
         "heating_kwh": heating_kwh,
         "grid_import_kwh": imported,
         "grid_export_kwh": exported,
@@ -228,13 +252,21 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
     bands = [[comfort_at(settings, r, data.slots[i].at) for r in settings.rooms] for i in starts]
     count = len(starts)
     fallback = [[band.fallback_c for band in row] for row in bands]
+    # Heat-only ACs cannot instantly cool an already warm room or meet a lower
+    # night ceiling at the boundary. Compare every five-minute step with the
+    # same coupled/shared-compressor model at minimum permitted targets. A
+    # schedule may inherit that excess heat, but must not prolong or increase it.
+    # Lower comfort limits remain hard: insufficient heating capacity is not
+    # excused by this recovery allowance.
+    minimum_targets = [[int(band.min_c) for band in row] for row in bands]
+    ceiling = simulate(settings, data, minimum_targets, detail=True)["temperature_trace"]
     targets = [row[:] for row in fallback]
-    baseline = simulate(settings, data, fallback)
+    baseline = simulate(settings, data, fallback, recovery_ceiling=ceiling)
     best = baseline
 
     def score(result: dict[str, Any]) -> tuple[float, float]:
         # Lexicographic priority: price can never purchase a comfort violation.
-        return (round(result["violation"], 8), result["objective"])
+        return (round(result["avoidable_violation"], 8), result["objective"])
 
     # Deterministic coordinate descent keeps runtime bounded on a Raspberry Pi.
     # This is a local search, with no claim of a globally optimal schedule.
@@ -248,15 +280,15 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
                     if value == original:
                         continue
                     targets[block][i] = value
-                    candidate = simulate(settings, data, targets)
+                    candidate = simulate(settings, data, targets, recovery_ceiling=ceiling)
                     if score(candidate) < score(best):
                         chosen, best = value, candidate
                 targets[block][i] = chosen
                 changed |= chosen != original
         if not changed:
             break
-    result = simulate(settings, data, targets, detail=True)
-    feasible = result["violation"] < 1e-6
+    result = simulate(settings, data, targets, detail=True, recovery_ceiling=ceiling)
+    feasible = result["avoidable_violation"] < 1e-6
     warnings = list(data.warnings)
     if data.energy_mode == "tariff_only":
         warnings.append(
@@ -278,16 +310,31 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
         warnings.append(
             "Predicted comfort is infeasible; use the comfort fallback, not this schedule."
         )
+    elif result["violation"] > 1e-6:
+        warnings.append(
+            "Recovery plan: existing heat or a lower night ceiling requires passive cooling in "
+            + ", ".join(result["recovering_rooms"])
+            + ". The schedule must not add to the excess above the minimum-target trajectory."
+        )
     return {
         "generated_at": data.generated_at.isoformat(),
         "mode": settings.mode,
         "energy_mode": data.energy_mode,
         "feasible": feasible,
+        "comfort_status": (
+            "infeasible"
+            if not feasible
+            else "recovering"
+            if result["violation"] > 1e-6
+            else "within_bounds"
+        ),
+        "recovering_rooms": result["recovering_rooms"],
         "validated_model": settings.validated_model,
         "estimated_cost": result["cost"],
         "baseline_estimated_cost": baseline["cost"],
         "estimated_difference": baseline["cost"] - result["cost"],
         "comfort_violation_degree_hours": result["violation"],
+        "avoidable_comfort_violation_degree_hours": result["avoidable_violation"],
         "heating_kwh": result["heating_kwh"],
         "warnings": warnings,
         "slots": result["slots"],

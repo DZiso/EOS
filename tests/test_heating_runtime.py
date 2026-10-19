@@ -114,6 +114,47 @@ async def test_battery_loss_and_recovery_replan_immediately_and_survive_restart(
 
 
 @pytest.mark.asyncio
+async def test_connection_loss_vetoes_recent_soc_and_recovery_replans(tmp_path, monkeypatch):
+    cfg, fake, states = setup(tmp_path,monkeypatch)
+    cfg.battery = Battery(soc_entity='sensor.battery',connection_entity='sensor.connection',
+                          connection_healthy_states=['1','2','3','10','11','12'])
+    now = datetime.now(timezone.utc)
+    states['sensor.battery'] = {'state':'77','last_reported':now.isoformat()}
+    states['sensor.connection'] = {'state':'3','last_reported':now.isoformat()}
+    await runtime.heating_tick()
+    assert runtime.load_json(tmp_path/'heating/plan.json',{})['energy_mode'] == 'full'
+    states['sensor.connection']['state'] = '0'
+    await runtime.heating_tick()
+    status = runtime.load_json(tmp_path/'heating/status.json',{})
+    assert status['energy_mode'] == 'solar_only'
+    assert status['battery']['measurements']['soc']['usable']
+    assert not status['battery']['measurements']['connection']['usable']
+    assert runtime.load_json(tmp_path/'heating/input.json',{})['battery_soc'] is None
+    states['sensor.connection']['state'] = '2'
+    await runtime.heating_tick()
+    assert runtime.load_json(tmp_path/'heating/plan.json',{})['energy_mode'] == 'full'
+    assert states['sensor.battery']['last_reported'] == now.isoformat()
+    observations = list((tmp_path/'heating').glob('observations-*.jsonl'))
+    assert json.loads(observations[0].read_text().splitlines()[-1])['entities']['sensor.connection']['state'] == '2'
+
+
+@pytest.mark.parametrize('health',['1','2','3','10','11','12','0','unknown','unavailable','99','missing','future'])
+def test_connection_modes_are_not_a_heartbeat(tmp_path,monkeypatch,health):
+    cfg, fake, states = setup(tmp_path,monkeypatch)
+    cfg.battery = Battery(soc_entity='sensor.battery',connection_entity='sensor.connection',
+                          connection_healthy_states=['1','2','3','10','11','12'])
+    now = datetime.now(timezone.utc)
+    states['sensor.battery'] = {'state':'77','last_reported':now.isoformat()}
+    if health != 'missing':
+        states['sensor.connection'] = {'state':'3' if health == 'future' else health,
+           'last_reported':(now+timedelta(hours=1) if health=='future' else now-timedelta(days=1)).isoformat()}
+    result = runtime.battery_status(cfg,states,now)
+    assert result['usable'] == (health in cfg.battery.connection_healthy_states)
+    states['sensor.battery']['last_reported'] = (now-timedelta(hours=2)).isoformat()
+    assert not runtime.battery_status(cfg,states,now)['usable']
+
+
+@pytest.mark.asyncio
 async def test_failed_fallback_replan_cannot_use_previous_full_plan_or_retry_each_cycle(tmp_path, monkeypatch):
     cfg, fake, states = setup(tmp_path, monkeypatch)
     cfg.battery = Battery(soc_entity="sensor.battery")

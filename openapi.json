@@ -4033,6 +4033,27 @@
               }
             ],
             "title": "Discharge Limit Entity"
+          },
+          "connection_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Entity",
+            "description": "Optional integration status; an unhealthy state vetoes battery credit."
+          },
+          "connection_healthy_states": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Connection Healthy States",
+            "description": "Exact healthy states, including any valid operating-mode codes. This is not a heartbeat."
           }
         },
         "additionalProperties": false,

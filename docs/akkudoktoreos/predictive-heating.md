@@ -101,6 +101,14 @@ Runtime status and observation logs retain the battery source timestamp, age,
 last reported value, uncertainty reason and selected planning mode. Compare these
 with Zendure's connection history; its status codes also represent operating
 modes and must not be treated as a simple online/offline flag.
+Configure `battery.connection_entity` and `battery.connection_healthy_states`
+to veto battery credit immediately on an explicit unhealthy connection, even
+when SoC is recent. For the inspected Zendure integration the healthy codes are
+`["1", "2", "3", "10", "11", "12"]`; `0` denotes unavailable/unknown, while
+`2` and `3` are operating modes. Recheck these mappings after integration changes.
+An unchanged healthy mode is not a heartbeat and never renews the SoC timestamp.
+Connection evidence is retained in status and observation logs. Battery recovery
+replans on the next cycle; an outage retains direct PV planning when available.
 
 Observation never calls climate services. A proposed schedule cannot validate a
 model against actual temperatures unless its actions and disturbances match the
@@ -109,7 +117,7 @@ observed run. Logs retain actual command outcomes separately from model estimate
 Basic comfort control requires `mode: "control"` and a configured
 `control_switch_entity` (HA input boolean) currently on. It does not need a COP or
 thermal model. Each room uses `fallback_c` as its normal room target, bounded by
-the comfort margin. Missing forecasts or a missing sensor in another room do not
+the actual comfort limits. Missing forecasts or a missing sensor in another room do not
 stop a healthy room's thermostat.
 
 For native AC thermostat control, use `room_feedback: false`, set
@@ -152,6 +160,24 @@ Fresh feasible schedules choose bounded room targets; the comfort controller
 translates them to AC setpoints. Missing/stale/infeasible plans return to basic
 comfort control. Cached forecasts with missing retrieval metadata trigger a real
 refresh, limited to once per 15 minutes; cached data is never relabelled fresh.
+
+The planner's `comfort_margin_c` is an interior preference costing €0.01 per
+degree-hour, not an additional hard limit. A configured 18°C minimum can therefore
+produce an 18°C AC target. Actual lower comfort limits remain hard constraints,
+including when heating capacity is insufficient.
+
+Heat-only ACs cannot instantly cool an already warm room or meet a lower night
+ceiling at the transition. The planner simulates minimum permitted targets as a
+reference, with the same shared compressors and room couplings. At every
+five-minute step, a schedule may inherit excess warmth only up to that reference;
+it may not increase or prolong it. Such an accepted plan has
+`comfort_status: "recovering"`, lists `recovering_rooms`, and still reports the
+full `comfort_violation_degree_hours`. Its
+`avoidable_comfort_violation_degree_hours` must be zero within numerical tolerance.
+This is a modelled recovery, not a guarantee that actual rooms are comfortable.
+The dashboard distinguishes accepted recovery from rejected schedules. Native
+thermostats continue controlling heat; rounded head temperatures do not trigger
+repeated off/on cycling.
 
 Manual changes suspend that room's control for four hours by default. Ownership,
 feedback offsets, target-hold times and overrides persist across app restarts.

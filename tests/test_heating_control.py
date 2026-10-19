@@ -144,9 +144,28 @@ def test_optimizer_targets_are_optional_and_bounded_by_room_comfort():
     assert decisions['room']['room_target_c']==21
     cfg.optimization_enabled=True;cfg.allow_estimated_model_control=True
     commands(cfg,proposal,states,NOW,{},decisions)
-    assert decisions['room']['room_target_c']==21.75
-    assert decisions['other']['room_target_c']==19.25
+    assert decisions['room']['room_target_c']==22
+    assert decisions['other']['room_target_c']==19
     assert decisions['room']['source']=='eos'
+
+
+def test_exact_night_minimum_reaches_native_thermostat_and_override_still_wins():
+    cfg, states, memory = setup_control()
+    cfg.optimization_enabled = cfg.allow_estimated_model_control = True
+    cfg.quiet_start_hour = cfg.quiet_end_hour = 0
+    for room in cfg.rooms:
+        room.room_feedback = False
+        room.night_comfort = ComfortRange(min_c=18, max_c=20, fallback_c=19)
+    proposal = {'feasible':True, 'generated_at':NOW.isoformat(),
+                'slots':[{'at':NOW.isoformat(), 'targets_c':{'room':18,'other':18}}]}
+    memory['climate.other'] = {'override_until': (NOW+timedelta(hours=2)).timestamp()}
+    decisions: dict[str, Any] = {}
+    calls = commands(cfg,proposal,states,NOW,memory,decisions)
+    assert decisions['room']['room_target_c'] == decisions['room']['ac_target_c'] == 18
+    assert decisions['room']['preset'] == 'quiet'
+    assert decisions['other']['state'] == 'manual_override'
+    assert any(c['data'].get('temperature') == 18 for c in calls)
+    assert all(c['data']['entity_id'] == 'climate.room' for c in calls)
 
 
 @pytest.mark.asyncio

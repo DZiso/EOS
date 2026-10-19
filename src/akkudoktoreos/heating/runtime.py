@@ -283,6 +283,33 @@ def battery_status(
             error = f"{entity}: {exc}"
             measurement["error"] = error
             report.update(usable=False, state="uncertain", error=error)
+    if battery.connection_entity:
+        entity = battery.connection_entity
+        state = states.get(entity, {})
+        stamp = state.get("last_reported") or state.get("last_updated")
+        health: dict[str, Any] = {
+            "entity": entity,
+            "source_at": stamp,
+            "last_value": state.get("state"),
+            "usable": False,
+        }
+        report["measurements"]["connection"] = health
+        try:
+            if not isinstance(stamp, str):
+                raise ValueError("Battery connection status has no source timestamp")
+            age = now.timestamp() - parse_time(stamp).timestamp()
+            health["age_seconds"] = round(age)
+            if age < -30:
+                raise ValueError("Battery connection status is future-dated")
+            if state.get("state") not in battery.connection_healthy_states:
+                raise ValueError("Battery integration reports an unhealthy or unknown connection")
+            # Status codes are persistent modes, not heartbeat reports. Healthy
+            # status never renews the independently checked SoC timestamp.
+            health["usable"] = True
+        except (ValueError, TypeError, OverflowError) as exc:
+            error = f"{entity}: {exc}"
+            health["error"] = error
+            report.update(usable=False, state="uncertain", error=error)
     report["values"] = values
     return report
 
@@ -383,6 +410,8 @@ def record_observation(
         entities.add(config.house_power_entity)
     if config.battery:
         entities.add(config.battery.soc_entity)
+        if config.battery.connection_entity:
+            entities.add(config.battery.connection_entity)
     observation: dict[str, Any] = {"at": now.isoformat(), "entities": {}}
     # Record only configured telemetry; never dump all household entities.
     for entity in sorted(entities):
@@ -519,6 +548,13 @@ async def heating_tick() -> None:
                 <= config.plan_max_age_seconds
             )
             status["plan_fresh"] = fresh
+            status["plan_accepted"] = bool(fresh and proposal and proposal.get("feasible"))
+            status["comfort_status"] = (
+                proposal.get("comfort_status") if fresh and proposal else None
+            )
+            status["recovering_rooms"] = (
+                proposal.get("recovering_rooms", []) if fresh and proposal else []
+            )
             decisions: dict[str, Any] = {}
             calls = commands(config, proposal if fresh else None, states, now, memory, decisions)
             status["rooms"] = decisions

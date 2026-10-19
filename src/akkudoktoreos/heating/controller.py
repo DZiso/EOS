@@ -217,10 +217,7 @@ def commands(
         )
         if not isinstance(room_target, (float, int)) or not math.isfinite(room_target):
             room_target = band.fallback_c
-        room_target = min(
-            band.max_c - settings.comfort_margin_c,
-            max(band.min_c + settings.comfort_margin_c, room_target),
-        )
+        room_target = min(band.max_c, max(band.min_c, room_target))
         temperature = reading.get("temperature_c") if reading["usable"] else None
         decision.update(
             room_target_c=room_target, source="eos" if slot else "comfort", state="active"
