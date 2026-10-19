@@ -178,6 +178,7 @@ class PlanningInput(Model):
     generated_at: datetime
     temperatures_c: dict[str, float]
     battery_soc: float | None = Field(default=None, ge=0, le=1)
+    energy_mode: Literal["full", "tariff_only"] = "full"
     slots: list[ForecastSlot] = Field(min_length=24, max_length=144)
     warnings: list[str] = Field(default_factory=list)
 

@@ -160,6 +160,18 @@ def test_missing_soc_does_not_mean_empty():
         plan(cfg, inputs(cfg))
 
 
+def test_tariff_only_plan_ignores_solar_and_battery_credit_even_when_supplied():
+    cfg = config(battery=Battery())
+    data = inputs(cfg, pv=20, soc=0.8)
+    data.energy_mode = "tariff_only"
+    result = plan(cfg, data)
+    assert result["energy_mode"] == "tariff_only"
+    for slot in result["slots"]:
+        assert slot["battery_soc"] is None
+        assert slot["battery_charge_kwh"] == slot["battery_discharge_kwh"] == slot["grid_export_kwh"] == 0
+        assert slot["grid_import_kwh"] == pytest.approx(0.3*0.25 + slot["heating_kwh"])
+
+
 @pytest.mark.parametrize(
     "stamp,cheap",
     [

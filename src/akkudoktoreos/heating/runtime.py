@@ -237,6 +237,56 @@ async def forecast_points(key: str, now: datetime) -> list[tuple[float, float]]:
     return points
 
 
+def battery_status(
+    config: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
+) -> dict[str, Any]:
+    """Report uncertainty without treating a cached unchanged SoC as a new report."""
+    battery = config.battery
+    report: dict[str, Any] = {
+        "usable": True,
+        "state": "not_configured",
+        "measurements": {},
+        "error": None,
+    }
+    if battery is None:
+        return report
+    report["state"] = "fresh"
+    values = {}
+    for attr, entity, scale in (
+        ("soc", battery.soc_entity, 100),
+        ("max_soc", battery.max_soc_entity, 100),
+        ("charge_kw", battery.charge_limit_entity, 1000),
+        ("discharge_kw", battery.discharge_limit_entity, 1000),
+    ):
+        if not entity:
+            continue
+        state = states.get(entity, {})
+        stamp = state.get("last_reported") or state.get("last_updated")
+        measurement: dict[str, Any] = {
+            "entity": entity,
+            "source_at": stamp,
+            "last_value": state.get("state"),
+            "usable": False,
+        }
+        report["measurements"][attr] = measurement
+        try:
+            if isinstance(stamp, str):
+                measurement["age_seconds"] = round(now.timestamp() - parse_time(stamp).timestamp())
+            value = read_number(state, now, config.measurement_max_age_seconds) / scale
+            if attr == "soc" and not 0 <= value <= 1:
+                raise ValueError("Battery SoC is outside 0–100%")
+            if attr != "soc":
+                type(battery).model_validate({**battery.model_dump(), attr: value})
+            values[attr] = value
+            measurement.update(usable=True, value=value)
+        except (ValueError, TypeError, OverflowError) as exc:
+            error = f"{entity}: {exc}"
+            measurement["error"] = error
+            report.update(usable=False, state="uncertain", error=error)
+    report["values"] = values
+    return report
+
+
 async def planning_input(
     config: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
 ) -> PlanningInput:
@@ -246,27 +296,21 @@ async def planning_input(
         "Household baseline is a configured estimate excluding HVAC; verify against observations."
     ]
     battery = config.battery
-    if battery:
-        soc = (
-            read_number(states.get(battery.soc_entity), now, config.measurement_max_age_seconds)
-            / 100
-        )
-        # Live power/SoC limits are read when configured. Never silently replace
-        # an unavailable limit with zero, and never issue commands to the battery.
-        updates = {}
-        for attr, entity, scale in (
-            ("max_soc", battery.max_soc_entity, 100),
-            ("charge_kw", battery.charge_limit_entity, 1000),
-            ("discharge_kw", battery.discharge_limit_entity, 1000),
-        ):
-            if entity:
-                updates[attr] = (
-                    read_number(states.get(entity), now, config.measurement_max_age_seconds) / scale
-                )
-        if updates:
-            config.battery = type(battery).model_validate({**battery.model_dump(), **updates})
+    report = battery_status(config, states, now)
+    tariff_only = not report["usable"]
+    if tariff_only:
+        # TODO: Monitor Zendure connection-status history during daylight/solar
+        # charging for intermittent disconnects. This fallback must not hide them:
+        # an old SoC can mean either normal idle operation or lost communication.
+        # Keep its real timestamp and uncertainty visible; never refresh cached data.
+        warnings.append("Battery data uncertain; tariff-only planning. " + report["error"])
+    elif battery:
+        values = report["values"]
+        soc = values["soc"]
+        updates = {key: value for key, value in values.items() if key != "soc"}
+        config.battery = type(battery).model_validate({**battery.model_dump(), **updates})
     outside = await forecast_points("weather_temp_air", now)
-    solar = await forecast_points("pvforecast_ac_power", now)
+    solar = [] if tariff_only else await forecast_points("pvforecast_ac_power", now)
     # Extend sunrise/sunset zeroes only to boundaries of forecast-covered days.
     local_zone = ZoneInfo(config.timezone)
     if solar and solar[0][1] == 0:
@@ -290,7 +334,9 @@ async def planning_input(
             ForecastSlot(
                 at=at,
                 outside_c=interpolate(outside, at.timestamp()),
-                pv_kw=max(0, interpolate(solar, at.timestamp(), solar=True)) / 1000,
+                pv_kw=0
+                if tariff_only
+                else max(0, interpolate(solar, at.timestamp(), solar=True)) / 1000,
                 baseline_kw=config.baseline_kw,
                 import_price_per_kwh=tariff_at(config, at),
                 export_price_per_kwh=config.export_price_per_kwh,
@@ -300,6 +346,7 @@ async def planning_input(
         generated_at=now,
         temperatures_c=temperatures,
         battery_soc=soc,
+        energy_mode="tariff_only" if tariff_only else "full",
         slots=slots,
         warnings=warnings,
     )
@@ -363,6 +410,7 @@ def record_observation(
 
 _lock = asyncio.Lock()
 _last_plan_attempt = 0.0
+_last_planning_mode: str | None = None
 _last_planning_error: str | None = None
 
 
@@ -372,7 +420,7 @@ def safe_error(exc: Exception) -> str:
 
 async def heating_tick() -> None:
     """Keep the room thermostat running independently of forecast failures."""
-    global _last_plan_attempt, _last_planning_error
+    global _last_plan_attempt, _last_planning_error, _last_planning_mode
     if _lock.locked():
         return
     async with _lock:
@@ -405,11 +453,18 @@ async def heating_tick() -> None:
             status["temperatures_c"] = {
                 room: item["temperature_c"] for room, item in readings.items() if item["usable"]
             }
+            status["battery"] = battery_status(config, states, now)
+            energy_mode = "full" if status["battery"]["usable"] else "tariff_only"
+            status["energy_mode"] = energy_mode
             # Failed forecast attempts retry at most every five minutes. Missing
             # room values still prevent optimization but never stop other rooms.
             interval = 300 if _last_planning_error or proposal is None else 900
-            if now.timestamp() - _last_plan_attempt >= interval:
+            if (
+                now.timestamp() - _last_plan_attempt >= interval
+                or energy_mode != _last_planning_mode
+            ):
                 _last_plan_attempt = now.timestamp()
+                _last_planning_mode = energy_mode
                 try:
                     await bootstrap_forecasts(config, client)
                     inputs = await planning_input(config, states, now)
@@ -426,6 +481,7 @@ async def heating_tick() -> None:
                 proposal
                 and usable
                 and not _last_planning_error
+                and proposal.get("energy_mode", "full") == energy_mode
                 and 0
                 <= now.timestamp() - parse_time(proposal["generated_at"]).timestamp()
                 <= config.plan_max_age_seconds

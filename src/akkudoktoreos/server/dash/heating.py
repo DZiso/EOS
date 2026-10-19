@@ -67,6 +67,18 @@ def Heating() -> Div:
         P(state.get("error") or ""),
         P("Planning: " + (state.get("planning_error") or "available")),
         P(
+            "Energy planning: tariff only — battery data is uncertain; estimates assume grid electricity."
+            if state.get("energy_mode") == "tariff_only"
+            else "Energy planning: tariff, solar and configured battery model."
+        ),
+        P(
+            "Battery data: "
+            + (
+                state.get("battery", {}).get("error")
+                or state.get("battery", {}).get("state", "not checked")
+            )
+        ),
+        P(
             "Comfort: "
             + ", ".join(
                 f"{r.id}: {r.min_c:g}–{r.max_c:g}°C"

@@ -15776,6 +15776,15 @@
             ],
             "title": "Battery Soc"
           },
+          "energy_mode": {
+            "type": "string",
+            "enum": [
+              "full",
+              "tariff_only"
+            ],
+            "title": "Energy Mode",
+            "default": "full"
+          },
           "slots": {
             "items": {
               "$ref": "#/components/schemas/ForecastSlot"

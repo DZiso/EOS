@@ -68,7 +68,7 @@ def simulate(
     rooms = settings.rooms
     indices = {r.id: i for i, r in enumerate(rooms)}
     temperatures = [data.temperatures_c[r.id] for r in rooms]
-    battery = settings.battery
+    battery = settings.battery if data.energy_mode == "full" else None
     stored = (
         data.battery_soc * battery.capacity_kwh if battery and data.battery_soc is not None else 0
     )
@@ -133,7 +133,8 @@ def simulate(
                 violation += (
                     max(0.0, low - temperatures[i]) + max(0.0, temperatures[i] - high)
                 ) * dt
-        net = (slot.baseline_kw - slot.pv_kw) * 0.25 + slot_electric
+        pv_kw = slot.pv_kw if data.energy_mode == "full" else 0.0
+        net = (slot.baseline_kw - pv_kw) * 0.25 + slot_electric
         battery_charge = battery_discharge = 0.0
         if battery and data.battery_soc is not None:
             cap_soc = slot.battery_max_soc if slot.battery_max_soc is not None else battery.max_soc
@@ -212,7 +213,7 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
         raise ValueError("A current temperature is required for every configured room")
     if any(not math.isfinite(t) or not 0 <= t <= 45 for t in data.temperatures_c.values()):
         raise ValueError("Invalid room temperature")
-    if settings.battery and data.battery_soc is None:
+    if data.energy_mode == "full" and settings.battery and data.battery_soc is None:
         raise ValueError("Battery SoC is required; missing does not mean empty")
     if len(data.slots) != settings.horizon_hours * 4:
         raise ValueError("Forecast length must match the configured horizon")
@@ -251,11 +252,16 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
     result = simulate(settings, data, targets, detail=True)
     feasible = result["violation"] < 1e-6
     warnings = list(data.warnings)
+    if data.energy_mode == "tariff_only":
+        warnings.append(
+            "Tariff-only estimate: all electricity is priced as grid import; "
+            "no solar or battery savings are assumed."
+        )
     if not settings.validated_model:
         warnings.append(
             "Thermal parameters and COP are unvalidated estimates; savings are not measured."
         )
-    if settings.battery and not settings.battery_limits_verified:
+    if data.energy_mode == "full" and settings.battery and not settings.battery_limits_verified:
         warnings.append("Battery limits are provisional; no battery commands are generated.")
     if not feasible:
         warnings.append(
@@ -264,6 +270,7 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
     return {
         "generated_at": data.generated_at.isoformat(),
         "mode": settings.mode,
+        "energy_mode": data.energy_mode,
         "feasible": feasible,
         "validated_model": settings.validated_model,
         "estimated_cost": result["cost"],
