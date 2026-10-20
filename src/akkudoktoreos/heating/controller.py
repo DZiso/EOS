@@ -282,11 +282,13 @@ def commands(
             or temperature >= band.max_c - settings.comfort_margin_c
             or band_changed
         )
-        hold = room.feedback_interval_seconds if room.room_feedback else settings.block_minutes * 60
+        # Only external-sensor corrections need a settling interval. Native
+        # thermostats must receive the accepted plan's current target; planner
+        # block duration is not an execution hold on an older plan's target.
         if (
-            (slot is not None or room.room_feedback)
+            room.room_feedback
             and not urgent
-            and now.timestamp() - lease.get("last_change", 0) < hold
+            and now.timestamp() - lease.get("last_change", 0) < room.feedback_interval_seconds
         ):
             target = signature.get("temperature") or target
         if not room.room_feedback:

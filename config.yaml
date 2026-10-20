@@ -6,7 +6,7 @@
 # the root directory (no add-on folder as usual).
 
 name: "EOS Predictive Heating"
-version: "0.4.0rc3.post9"
+version: "0.4.0rc3.post10"
 slug: "eos_heating"
 description: "Room comfort control with EOS tariff/solar heating plans and quiet hours"
 url: "https://github.com/DZiso/EOS/tree/feat/predictive-heating"

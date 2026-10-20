@@ -168,6 +168,42 @@ def test_exact_night_minimum_reaches_native_thermostat_and_override_still_wins()
     assert all(c['data']['entity_id'] == 'climate.room' for c in calls)
 
 
+@pytest.mark.parametrize('previous_target,next_target', [(21, 19), (19, 18), (19, 21)])
+def test_native_thermostat_follows_new_plan_without_an_execution_hold(previous_target, next_target):
+    cfg, states, memory = setup_control()
+    cfg.optimization_enabled = cfg.allow_estimated_model_control = True
+    room = cfg.rooms[1]
+    room.night_comfort = ComfortRange(min_c=18, max_c=22, fallback_c=19)
+    room.temperature_entity = room.climate_entity
+    room.temperature_attribute = 'current_temperature'
+    before = datetime.fromisoformat('2026-10-20T02:47:36+00:00')  # 04:47 Berlin
+    states[room.climate_entity]['last_reported'] = before.isoformat()
+    states[room.climate_entity]['attributes']['current_temperature'] = 20
+    proposal = {'feasible': True, 'generated_at': before.isoformat(),
+                'slots': [{'at': before.isoformat(), 'targets_c': {'other': previous_target}}]}
+    acknowledge(states, commands(cfg, proposal, states, before, memory))
+    assert states[room.climate_entity]['attributes']['temperature'] == previous_target
+    assert memory[room.climate_entity]['last_change'] == before.timestamp()
+
+    # Reproduce the 05:02 plan revision after the cheap tariff ends. Persisted
+    # last_change from the previous release must not delay the new plan.
+    memory = json.loads(json.dumps(memory))
+    later = before + timedelta(minutes=15)
+    proposal = {'feasible': True, 'generated_at': later.isoformat(),
+                'slots': [{'at': later.isoformat(), 'targets_c': {'other': next_target}}]}
+    decisions: dict[str, Any] = {}
+    calls = [c for c in commands(cfg, proposal, states, later, memory, decisions)
+             if c['data']['entity_id'] == room.climate_entity]
+    assert calls == [{'domain': 'climate', 'service': 'set_temperature',
+                      'data': {'entity_id': room.climate_entity, 'temperature': next_target}}]
+    assert decisions['other']['room_target_c'] == decisions['other']['ac_target_c'] == next_target
+    acknowledge(states, calls)
+    assert states[room.climate_entity]['state'] == 'heat'
+    assert states[room.climate_entity]['attributes']['preset_mode'] == 'quiet'
+    assert not [c for c in commands(cfg, proposal, states, later + timedelta(minutes=1), memory)
+                if c['data']['entity_id'] == room.climate_entity]
+
+
 @pytest.mark.asyncio
 async def test_cached_forecast_without_metadata_gets_a_real_refresh(monkeypatch):
     provider = SimpleNamespace(record_keys=['weather_temp_air'],update_datetime=None)

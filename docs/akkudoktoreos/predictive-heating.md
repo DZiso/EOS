@@ -123,7 +123,12 @@ stop a healthy room's thermostat.
 For native AC thermostat control, use `room_feedback: false`, set
 `temperature_entity` to the AC's climate entity and `temperature_attribute` to
 `current_temperature`. The automatic setpoint stays inside the comfort range;
-no external sensor correction is added.
+no external sensor correction is added. A fresh accepted plan's current target
+is applied on the next control tick, including when the previous target changed
+recently. `block_minutes` sets the planner's target blocks; it does not impose
+an additional controller hold. Unchanged targets do not resend commands.
+Manual overrides, command acknowledgement and the ten-minute minimum off time
+still take priority.
 
 A room can have a separate `night_comfort`, for example
 `{"min_c": 18, "max_c": 20, "fallback_c": 19}`. This applies during
@@ -180,7 +185,7 @@ thermostats continue controlling heat; rounded head temperatures do not trigger
 repeated off/on cycling.
 
 Manual changes suspend that room's control for four hours by default. Ownership,
-feedback offsets, target-hold times and overrides persist across app restarts.
+feedback offsets, external-feedback hold times and overrides persist across app restarts.
 Turning the HA helper off releases ownership and stops further commands; it does
 not turn the ACs off. The executor checks the helper before every command.
 
