@@ -457,3 +457,17 @@ def test_invalid_night_range_and_margin_are_rejected():
     cfg['comfort_margin_c'] = 0.5
     with pytest.raises(ValidationError, match='margin'):
         HeatingSettings.model_validate(cfg)
+
+
+def test_planned_off_idles_a_warm_room_and_keeps_the_comfort_minimum():
+    cfg = config(planned_off=True)
+    warm = plan(cfg, inputs(cfg, temps={'living': 21.5, 'office': 21.5}, outside=10))
+    assert warm['feasible'] and any(s['targets_c']['living'] == 'off' for s in warm['slots'])
+    assert warm['avoidable_comfort_violation_degree_hours'] < 1e-6
+    # At the minimum with a cold night ahead, switching off would break comfort.
+    cold = plan(cfg, inputs(cfg, temps={'living': 19, 'office': 19}, outside=-5))
+    assert cold['slots'][0]['targets_c']['living'] != 'off'
+    assert all(s['temperatures_c']['living'] >= 19 - 1e-6 for s in cold['slots'])
+    # Off stays opt-in: existing configurations only ever get integer targets.
+    assert all(t != 'off' for s in plan(config(), inputs(config(), temps={'living': 21.5, 'office': 21.5}, outside=10))['slots']
+               for t in s['targets_c'].values())

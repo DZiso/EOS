@@ -357,3 +357,78 @@ def test_manual_override_is_preserved_across_night_boundary():
     memory['climate.other'] = {'override_until': night.timestamp() + 3600}
     assert not [c for c in commands(cfg, None, states, night, memory)
                 if c['data']['entity_id'] == 'climate.other']
+
+
+def native_off_setup():
+    cfg, states, memory = setup_control()
+    cfg.planned_off = cfg.optimization_enabled = cfg.allow_estimated_model_control = True
+    room = cfg.rooms[1]
+    room.temperature_entity = room.climate_entity
+    room.temperature_attribute = 'current_temperature'
+    return cfg, states, memory
+
+
+def off_plan(at, target):
+    return {'feasible': True, 'generated_at': at.isoformat(),
+            'slots': [{'at': at.isoformat(), 'targets_c': {'other': target}}]}
+
+
+def other_calls(calls):
+    return [c for c in calls if c['data']['entity_id'] == 'climate.other']
+
+
+def test_planned_off_switches_mode_only_and_restarts_after_minimum_off_time():
+    cfg, states, memory = native_off_setup()
+    decisions: dict[str, Any] = {}
+    calls = other_calls(commands(cfg, off_plan(NOW, 'off'), states, NOW, memory, decisions))
+    assert calls == [{'domain': 'climate', 'service': 'set_hvac_mode',
+                      'data': {'entity_id': 'climate.other', 'hvac_mode': 'off'}}]
+    assert decisions['other']['state'] == 'planned_off'
+    acknowledge(states, calls)
+    # Samsung reports preset none while off: that is not a manual override.
+    states['climate.other']['attributes']['preset_mode'] = 'none'
+    later = NOW + timedelta(minutes=5)
+    assert not other_calls(commands(cfg, off_plan(later, 'off'), states, later, memory, decisions))
+    assert decisions['other']['state'] == 'planned_off'
+    assert not other_calls(commands(cfg, off_plan(later, 21), states, later, memory, decisions))
+    assert decisions['other']['state'] == 'minimum_off_time'
+    # A planned off period holds for one block while the room is comfortable...
+    held = NOW + timedelta(minutes=30)
+    states['climate.other']['last_reported'] = held.isoformat()
+    assert not other_calls(commands(cfg, off_plan(held, 21), states, held, memory, decisions))
+    assert decisions['other']['state'] == 'minimum_off_time'
+    # ...but restarts after ten minutes once the room nears its minimum.
+    states['climate.other']['attributes']['current_temperature'] = 19
+    assert other_calls(commands(cfg, off_plan(held, 21), states, held, json.loads(json.dumps(memory))))
+    states['climate.other']['attributes']['current_temperature'] = 24
+    restart = NOW + timedelta(minutes=61)
+    states['climate.other']['last_reported'] = restart.isoformat()
+    calls = other_calls(commands(cfg, off_plan(restart, 21), states, restart, memory, decisions))
+    assert [c['service'] for c in calls] == ['set_hvac_mode', 'set_preset_mode', 'set_temperature']
+    acknowledge(states, calls)
+    assert states['climate.other']['state'] == 'heat'
+    assert states['climate.other']['attributes']['temperature'] == 21
+    # A user switching the unit on while planned off is still a manual override.
+    off_again = restart + timedelta(hours=2)
+    states['climate.other']['last_reported'] = off_again.isoformat()
+    acknowledge(states, other_calls(commands(cfg, off_plan(off_again, 'off'), states, off_again, memory)))
+    assert states['climate.other']['state'] == 'off'
+    states['climate.other']['state'] = 'heat'
+    after = off_again + timedelta(minutes=5)
+    assert not other_calls(commands(cfg, off_plan(after, 'off'), states, after, memory, decisions))
+    assert decisions['other']['state'] == 'manual_override'
+
+
+@pytest.mark.parametrize('reading,ran_minutes,reason', [
+    (19, 120, 'below_comfort_floor'),   # 19 < min 19 + 0.25 margin
+    (24, 30, 'minimum_run_time'),
+])
+def test_planned_off_is_refused_near_the_floor_and_before_minimum_run(reading, ran_minutes, reason):
+    cfg, states, memory = native_off_setup()
+    states['climate.other']['attributes']['current_temperature'] = reading
+    memory['climate.other'] = {'last_mode_change': (NOW - timedelta(minutes=ran_minutes)).timestamp()}
+    decisions: dict[str, Any] = {}
+    calls = other_calls(commands(cfg, off_plan(NOW, 'off'), states, NOW, memory, decisions))
+    assert decisions['other']['off_refused'] == reason
+    assert all(c['service'] != 'set_hvac_mode' for c in calls)
+    assert decisions['other']['ac_target_c'] == 19

@@ -38,7 +38,10 @@ def Heating() -> Div:
             Tr(
                 Td(parse_time(slot["at"]).astimezone(timezone_local).strftime("%a %H:%M %Z")),
                 *(
-                    Td(f"{slot['targets_c'][r]}° → {slot['temperatures_c'][r]:.1f}°")
+                    Td(
+                        f"{'Off' if slot['targets_c'][r] == 'off' else str(slot['targets_c'][r]) + '°'}"
+                        f" → {slot['temperatures_c'][r]:.1f}°"
+                    )
                     for r in room_names
                 ),
                 Td("Quiet" if slot["quiet"] else "Normal"),

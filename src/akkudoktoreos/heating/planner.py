@@ -17,6 +17,15 @@ from akkudoktoreos.heating.models import (
     Room,
 )
 
+# Planned-off sentinel in target rows; Samsung targets start at 16 C.
+OFF = 0
+# With planned_off: estimated cost per hour of leaving an AC in Heat. Its own
+# thermostat still runs where the model predicts no demand; a Heat/Quiet 19 C
+# bedroom drew 0.078 kWh/h (about 2.3 ct) on 2026-10-19. Unvalidated estimate.
+IDLE_HEAT_COST_PER_HOUR = 0.02
+# Cost of each off<->heat switch: an off period must save about three idle hours.
+MODE_SWITCH_COST = 0.03
+
 
 def in_window(hour: int, start: int, end: int) -> bool:
     if start == end:
@@ -101,7 +110,9 @@ def simulate(
                 flows[a] += flow
                 flows[b] -= flow
             demand = [
-                min(
+                0.0
+                if target[i] == OFF
+                else min(
                     r.max_heat_kw,
                     max(0.0, (target[i] - temperatures[i]) * r.capacity_kwh_per_k / dt - flows[i]),
                 )
@@ -130,7 +141,8 @@ def simulate(
                 if 0 < electric < group.min_electric_kw:
                     # Conservative cycling loss, not an invented continuous minimum load.
                     electric /= 0.85
-                electric = min(group.max_electric_kw, electric + group.standby_kw)
+                standby = group.standby_kw if any(target[i] != OFF for i in members) else 0.0
+                electric = min(group.max_electric_kw, electric + standby)
                 group_energy[group.id] += electric * dt
                 slot_electric += electric * dt
             for i, room in enumerate(rooms):
@@ -190,7 +202,7 @@ def simulate(
             records.append(
                 {
                     "at": slot.at.isoformat(),
-                    "targets_c": dict(zip(indices, target)),
+                    "targets_c": dict(zip(indices, ("off" if t == OFF else t for t in target))),
                     "temperatures_c": dict(zip(indices, temperatures)),
                     "quiet": quiet,
                     "heating_kwh": slot_electric,
@@ -221,7 +233,23 @@ def simulate(
     changes = sum(
         sum(a != b for a, b in zip(targets[i - 1], targets[i])) for i in range(1, len(targets))
     )
-    objective = cost - thermal_value - battery_value + changes * 0.002 + margin_violation * 0.01
+    idle = switches = 0.0
+    if settings.planned_off:
+        idle = 0.25 * sum(t != OFF for b in blocks for t in targets[b]) * IDLE_HEAT_COST_PER_HOUR
+        switches = MODE_SWITCH_COST * sum(
+            (a == OFF) != (b == OFF)
+            for i in range(1, len(targets))
+            for a, b in zip(targets[i - 1], targets[i])
+        )
+    objective = (
+        cost
+        - thermal_value
+        - battery_value
+        + changes * 0.002
+        + margin_violation * 0.01
+        + idle
+        + switches
+    )
     return {
         "cost": cost,
         "objective": objective,
@@ -260,33 +288,59 @@ def plan(settings: HeatingSettings, data: PlanningInput) -> dict[str, Any]:
     # excused by this recovery allowance.
     minimum_targets = [[int(band.min_c) for band in row] for row in bands]
     ceiling = simulate(settings, data, minimum_targets, detail=True)["temperature_trace"]
-    targets = [row[:] for row in fallback]
     baseline = simulate(settings, data, fallback, recovery_ceiling=ceiling)
-    best = baseline
 
     def score(result: dict[str, Any]) -> tuple[float, float]:
         # Lexicographic priority: price can never purchase a comfort violation.
         return (round(result["avoidable_violation"], 8), result["objective"])
 
-    # Deterministic coordinate descent keeps runtime bounded on a Raspberry Pi.
-    # This is a local search, with no claim of a globally optimal schedule.
-    for _ in range(2):
-        changed = False
-        for block in range(count - 1, -1, -1):
-            for i, room in enumerate(settings.rooms):
-                original = chosen = targets[block][i]
-                band = bands[block][i]
-                for value in range(math.ceil(band.min_c), math.floor(band.max_c) + 1):
-                    if value == original:
-                        continue
-                    targets[block][i] = value
-                    candidate = simulate(settings, data, targets, recovery_ceiling=ceiling)
-                    if score(candidate) < score(best):
-                        chosen, best = value, candidate
-                targets[block][i] = chosen
-                changed |= chosen != original
-        if not changed:
-            break
+    def search(initial: list[list[int]]) -> tuple[list[list[int]], dict[str, Any]]:
+        # Deterministic coordinate descent keeps runtime bounded on a Raspberry Pi.
+        # This is a local search, with no claim of a globally optimal schedule.
+        targets = [row[:] for row in initial]
+        best = simulate(settings, data, targets, recovery_ceiling=ceiling)
+        for _ in range(2):
+            changed = False
+            for block in range(count - 1, -1, -1):
+                for i, room in enumerate(settings.rooms):
+                    original = chosen = targets[block][i]
+                    band = bands[block][i]
+                    values = list(range(math.ceil(band.min_c), math.floor(band.max_c) + 1))
+                    if settings.planned_off and not room.room_feedback:
+                        values.append(OFF)
+                    for value in values:
+                        if value == original:
+                            continue
+                        targets[block][i] = value
+                        candidate = simulate(settings, data, targets, recovery_ceiling=ceiling)
+                        if score(candidate) < score(best):
+                            chosen, best = value, candidate
+                    targets[block][i] = chosen
+                    changed |= chosen != original
+            if not changed:
+                break
+        return targets, best
+
+    targets, best = search(fallback)
+    if settings.planned_off:
+        # Single-block moves cannot open a multi-hour off period: one off block
+        # pays two mode switches. Restart from that plan with every block whose
+        # target is at or below the predicted room temperature already off.
+        trace = simulate(settings, data, targets, detail=True)["temperature_trace"]
+        seed = [
+            [
+                OFF
+                if not room.room_feedback
+                and value
+                <= (trace[starts[b] * 3 - 1][i] if starts[b] else data.temperatures_c[room.id])
+                else value
+                for i, (room, value) in enumerate(zip(settings.rooms, row))
+            ]
+            for b, row in enumerate(targets)
+        ]
+        off_targets, off_best = search(seed)
+        if score(off_best) < score(best):
+            targets = off_targets
     result = simulate(settings, data, targets, detail=True, recovery_ceiling=ceiling)
     feasible = result["avoidable_violation"] < 1e-6
     warnings = list(data.warnings)

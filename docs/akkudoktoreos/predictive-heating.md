@@ -166,6 +166,25 @@ translates them to AC setpoints. Missing/stale/infeasible plans return to basic
 comfort control. Cached forecasts with missing retrieval metadata trigger a real
 refresh, limited to once per 15 minutes; cached data is never relabelled fresh.
 
+Set `planned_off: true` to let accepted plans switch native-thermostat ACs
+(`room_feedback: false`) off between heating blocks. In Heat mode the AC's own
+thermostat can run where the model predicts no demand, so the planner charges an
+estimated €0.02 per room-hour left in Heat (a Heat/Quiet bedroom drew 0.078 kWh/h)
+and €0.03 per off/heat switch, so an off period must save about three idle hours.
+These are unvalidated estimates. Off blocks have no heat and no compressor standby;
+lower comfort limits stay hard. Single-block search moves cannot open a multi-hour
+off period, so a second search starts from the first plan with every block whose
+target is at or below the predicted temperature switched off; the better plan wins.
+The controller sends only the mode change and refuses the off period, keeping the
+AC heating at the comfort minimum, when the AC reading is below
+`min_c + comfort_margin_c`, before the unit has run for one `block_minutes`, or
+when the device has no off mode. A stale reading falls back to Heat. A planned off
+period also holds for one block, unless the reading nears the comfort minimum;
+then the ten-minute minimum off time applies. Restarting reapplies mode, preset
+and target. A
+unit expected off matches any reported off state, because Samsung can change the
+reported preset while off; a user switching it on is still a manual override.
+
 The planner's `comfort_margin_c` is an interior preference costing €0.01 per
 degree-hour, not an additional hard limit. A configured 18°C minimum can therefore
 produce an 18°C AC target. Actual lower comfort limits remain hard constraints,

@@ -89,6 +89,26 @@ def _signature(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _switch_off(
+    entity: str, signature: dict[str, Any], now: datetime, lease: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Mode only: some Samsung devices turn on when preset or target is written while off."""
+    if signature["hvac_mode"] == "off":
+        return []
+    lease.update(
+        expected={**signature, "hvac_mode": "off"},
+        pending_until=now.timestamp() + 120,
+        last_mode_change=now.timestamp(),
+    )
+    return [
+        {
+            "domain": "climate",
+            "service": "set_hvac_mode",
+            "data": {"entity_id": entity, "hvac_mode": "off"},
+        }
+    ]
+
+
 def _room_offset(
     room: Room,
     state: dict[str, Any],
@@ -191,7 +211,9 @@ def commands(
         lease = memory.setdefault(entity, {})
         signature = _signature(state)
         previous = lease.get("expected")
-        if previous and signature != previous:
+        # Samsung can report another preset while off; an expected off matches any off.
+        expected_off = bool(previous) and previous["hvac_mode"] == signature["hvac_mode"] == "off"
+        if previous and signature != previous and not expected_off:
             if now.timestamp() <= lease.get("pending_until", 0):
                 decision["state"] = "awaiting_acknowledgement"
                 continue
@@ -215,6 +237,10 @@ def commands(
             if slot is None
             else slot.get("targets_c", {}).get(room.id, band.fallback_c)
         )
+        planned_off = settings.planned_off and not room.room_feedback and room_target == "off"
+        if planned_off:
+            # Used only when the off period is refused below.
+            room_target = band.min_c
         if not isinstance(room_target, (float, int)) or not math.isfinite(room_target):
             room_target = band.fallback_c
         room_target = min(band.max_c, max(band.min_c, room_target))
@@ -237,20 +263,26 @@ def commands(
                 decision.update(
                     state="comfort_paused", hvac_mode="off", ac_target_c=signature["temperature"]
                 )
-                if signature["hvac_mode"] != "off" and "off" in attrs.get("hvac_modes", []):
-                    calls.append(
-                        {
-                            "domain": "climate",
-                            "service": "set_hvac_mode",
-                            "data": {"entity_id": entity, "hvac_mode": "off"},
-                        }
-                    )
-                    lease.update(
-                        expected={**signature, "hvac_mode": "off"},
-                        pending_until=now.timestamp() + 120,
-                        last_mode_change=now.timestamp(),
-                    )
+                if "off" in attrs.get("hvac_modes", []):
+                    calls.extend(_switch_off(entity, signature, now, lease))
                 continue
+            if planned_off:
+                running = now.timestamp() - lease.get("last_mode_change", 0)
+                if "off" not in attrs.get("hvac_modes", []):
+                    decision["off_refused"] = "unsupported_device"
+                elif temperature < band.min_c + settings.comfort_margin_c:
+                    decision["off_refused"] = "below_comfort_floor"
+                elif signature["hvac_mode"] == "heat" and running < settings.block_minutes * 60:
+                    decision["off_refused"] = "minimum_run_time"
+                else:
+                    decision.update(
+                        state="planned_off", hvac_mode="off", ac_target_c=signature["temperature"]
+                    )
+                    switched = _switch_off(entity, signature, now, lease)
+                    if switched:
+                        lease["planned_off"] = True
+                    calls.extend(switched)
+                    continue
             offset = (
                 _room_offset(room, state, reading, room_target, now, lease)
                 if room.room_feedback
@@ -258,9 +290,17 @@ def commands(
             )
             target = int(math.floor(room_target + offset + 0.5))
             decision["setpoint_offset_c"] = offset
+        # A planned off period holds for one block unless the room nears its minimum.
+        minimum_off = (
+            settings.block_minutes * 60
+            if lease.get("planned_off")
+            and temperature is not None
+            and temperature >= band.min_c + settings.comfort_margin_c
+            else 600
+        )
         if (
             signature["hvac_mode"] == "off"
-            and now.timestamp() - lease.get("last_mode_change", 0) < 600
+            and now.timestamp() - lease.get("last_mode_change", 0) < minimum_off
         ):
             decision["state"] = "minimum_off_time"
             continue
@@ -323,4 +363,5 @@ def commands(
                 lease["last_change"] = now.timestamp()
             if mode_changed:
                 lease["last_mode_change"] = now.timestamp()
+                lease.pop("planned_off", None)
     return calls

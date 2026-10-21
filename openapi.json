@@ -10745,6 +10745,12 @@
             "title": "Allow Estimated Model Control",
             "default": false
           },
+          "planned_off": {
+            "type": "boolean",
+            "title": "Planned Off",
+            "description": "Let accepted plans switch native-thermostat ACs off between heating blocks.",
+            "default": false
+          },
           "battery_limits_verified": {
             "type": "boolean",
             "title": "Battery Limits Verified",

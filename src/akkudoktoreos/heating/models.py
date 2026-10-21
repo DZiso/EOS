@@ -125,6 +125,10 @@ class HeatingSettings(Model):
     validated_model: bool = False
     optimization_enabled: bool = False
     allow_estimated_model_control: bool = False
+    planned_off: bool = Field(
+        default=False,
+        description="Let accepted plans switch native-thermostat ACs off between heating blocks.",
+    )
     battery_limits_verified: bool = False
     control_switch_entity: str | None = Field(default=None, pattern=r"^input_boolean\.[a-z0-9_]+$")
     solar_planes: list[SolarPlane] = Field(default_factory=list, max_length=8)
