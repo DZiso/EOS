@@ -75,6 +75,29 @@ Unverified battery limits are flagged. Changing SoC ceilings can be supplied per
 slot through the API; the live adapter currently holds the observed/configured
 ceiling over its horizon. This release does not automatically fit or certify COP.
 
+### Automatic model fit
+
+A room with an `energy_entity` (its indoor unit's cumulative kWh counter) has its
+`loss_kw_per_k` and `capacity_kwh_per_k` refitted once a day from the stored
+observations, and the planner uses the fit in place of the configured values. The
+configuration is not rewritten; `/v1/heating/status` shows the fit under
+`runtime.model`, with `applied` and a `reason` when it is not.
+
+- Loss is delivered heat (metered electricity times the configured COP curve)
+  divided by degree-hours to outside. Household and solar gains are not measured
+  and lower it, so it is an effective value that makes planned energy match
+  metered energy. A wrong COP curve shifts loss and capacity by the same factor.
+- The time constant comes from periods with the unit off for at least 30 minutes,
+  and capacity is time constant times loss. It is bounded to 5–100 hours, and
+  needs 10 K of accumulated cooling before it replaces the configured ratio.
+- A fit needs three complete days, must predict each left-out day's heat within
+  50 % in total, and skips days on which a unit used energy while reported off.
+- A unit's own reading is capped at its setpoint while it heats, in the fit and
+  as the planner's start temperature, because a running unit warms its own sensor.
+
+The counters of indoor units on one outdoor unit are taken as that unit's
+allocation per room. If they are not, give those rooms no `energy_entity`.
+
 ## Observation and execution
 
 Observation records only configured telemetry once per minute, retaining 30 days

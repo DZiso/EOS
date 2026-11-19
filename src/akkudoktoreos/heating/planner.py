@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from akkudoktoreos.heating.models import (
     ComfortRange,
+    Compressor,
     HeatingSettings,
     PlanningInput,
     Room,
@@ -71,6 +72,11 @@ def tariff_at(settings: HeatingSettings, at: datetime) -> float:
     return settings.night_price_per_kwh if cheap else settings.day_price_per_kwh
 
 
+def cop_at(group: Compressor, outside_c: float) -> float:
+    cop = max(1.2, min(5.0, group.cop_at_7c + group.cop_slope_per_k * (outside_c - 7)))
+    return cop * group.defrost_factor if -5 <= outside_c <= 5 else cop
+
+
 def simulate(
     settings: HeatingSettings,
     data: PlanningInput,
@@ -122,11 +128,7 @@ def simulate(
             for group in settings.compressors:
                 members = [indices[r] for r in group.rooms]
                 requested = sum(demand[i] for i in members)
-                cop = max(
-                    1.2, min(5.0, group.cop_at_7c + group.cop_slope_per_k * (slot.outside_c - 7))
-                )
-                if -5 <= slot.outside_c <= 5:
-                    cop *= group.defrost_factor
+                cop = cop_at(group, slot.outside_c)
                 # Capacity and electricity are limited once per outdoor unit.
                 capacity = min(group.max_heat_kw, group.max_electric_kw * cop)
                 if not group.min_outside_c <= slot.outside_c <= group.max_outside_c:

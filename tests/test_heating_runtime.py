@@ -552,3 +552,15 @@ async def test_feedback_and_manual_override_survive_worker_restart(tmp_path, mon
     assert json.loads(path.read_text())["climate.room"]["setpoint_offset_c"] == 3
     status = json.loads((tmp_path / "heating/status.json").read_text())
     assert status["rooms"]["room"]["state"] == "manual_override"
+
+
+@pytest.mark.asyncio
+async def test_tick_records_outdoor_temperature_and_reports_the_model_fit(tmp_path, monkeypatch):
+    cfg, _, _ = setup(tmp_path, monkeypatch)
+    cfg.rooms[0].energy_entity = "sensor.room_energy"
+    await runtime.heating_tick()
+    record = json.loads(next((tmp_path / "heating").glob("observations-*.jsonl")).read_text().splitlines()[-1])
+    assert record["outside_c"] == 8 and "sensor.room_energy" in record["entities"]
+    status = json.loads((tmp_path / "heating" / "status.json").read_text())
+    assert status["model"]["room"] == {"days": 0, "applied": False, "reason": "not enough data"}
+    assert json.loads((tmp_path / "heating" / "calibration.json").read_text())["fitted_on"]

@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from akkudoktoreos.core import coreabc
 from akkudoktoreos.heating import runtime
-from akkudoktoreos.heating.controller import commands, temperature_status
+from akkudoktoreos.heating.controller import commands, planning_temperatures, temperature_status
 from akkudoktoreos.heating.models import ComfortRange, Compressor, HeatingSettings, Room
 from akkudoktoreos.server.rest.heating import router
 
@@ -432,3 +432,17 @@ def test_planned_off_is_refused_near_the_floor_and_before_minimum_run(reading, r
     assert decisions['other']['off_refused'] == reason
     assert all(c['service'] != 'set_hvac_mode' for c in calls)
     assert decisions['other']['ac_target_c'] == 19
+
+
+def test_planner_caps_a_heating_units_own_reading_at_its_setpoint():
+    cfg, states, _ = setup_control()
+    native = cfg.rooms[1]
+    native.temperature_entity, native.temperature_attribute = native.climate_entity, "current_temperature"
+    # Heating to 22 with the intake at 24: the room cannot be above 22.
+    assert planning_temperatures(cfg, states, NOW) == {"room": 20, "other": 22}
+    # A cooler reading is believed, and so is any reading once the unit is off.
+    states["climate.other"]["attributes"]["current_temperature"] = 21
+    assert planning_temperatures(cfg, states, NOW)["other"] == 21
+    states["climate.other"].update(state="off")
+    states["climate.other"]["attributes"]["current_temperature"] = 24
+    assert planning_temperatures(cfg, states, NOW)["other"] == 24

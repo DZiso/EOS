@@ -14,11 +14,12 @@ from zoneinfo import ZoneInfo
 import requests
 from loguru import logger
 
+from akkudoktoreos.heating import calibration
 from akkudoktoreos.heating.controller import (
     commands,
     parse_time,
     read_number,
-    read_temperatures,
+    planning_temperatures,
     temperature_status,
 )
 from akkudoktoreos.heating.models import ForecastSlot, HeatingSettings, PlanningInput
@@ -317,7 +318,7 @@ def battery_status(
 async def planning_input(
     config: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
 ) -> PlanningInput:
-    temperatures = read_temperatures(config, states, now)
+    temperatures = planning_temperatures(config, states, now)
     soc = None
     warnings = [
         "Household baseline is a configured estimate excluding HVAC; verify against observations."
@@ -405,7 +406,9 @@ def record_observation(
     entities = {r.temperature_entity for r in config.rooms} | {
         r.climate_entity for r in config.rooms
     }
-    entities |= set(config.hvac_energy_entities)
+    entities |= set(config.hvac_energy_entities) | {
+        r.energy_entity for r in config.rooms if r.energy_entity
+    }
     if config.house_power_entity:
         entities.add(config.house_power_entity)
     if config.battery:
@@ -431,6 +434,11 @@ def record_observation(
                 if k in attrs
             },
         }
+    # The model fit needs the outdoor temperature each plan was made with.
+    for slot in reversed(load_json(data_dir() / "input.json", {}).get("slots", [])[:8]):
+        if 0 <= now.timestamp() - parse_time(slot["at"]).timestamp() < 3600:
+            observation["outside_c"] = slot["outside_c"]
+            break
     quality = temperature_status(config, states, now)
     observation["measurements"] = quality
     observation["temperatures_c"] = {
@@ -526,7 +534,19 @@ async def heating_tick() -> None:
                 try:
                     await bootstrap_forecasts(config, client)
                     inputs = await planning_input(config, states, now)
-                    proposal = await asyncio.to_thread(plan, config, inputs)
+                    fitted = load_json(data_dir() / "calibration.json", {})
+                    if fitted.get("fitted_on") != now.strftime("%Y-%m-%d"):
+                        try:
+                            fitted = await asyncio.to_thread(
+                                calibration.update, config, data_dir(), now
+                            )
+                            save_json(data_dir() / "calibration.json", fitted)
+                        except Exception as exc:
+                            # A failed fit keeps the previous one; it never stops planning.
+                            logger.warning("Heating model fit unavailable: {}", safe_error(exc))
+                    planned = calibration.apply(config, fitted.get("rooms", {}))
+                    proposal = await asyncio.to_thread(plan, planned, inputs)
+                    proposal["model"] = fitted.get("rooms", {})
                     save_json(data_dir() / "input.json", inputs.model_dump(mode="json"))
                     save_json(data_dir() / "plan.json", proposal)
                     _last_planning_error = None
@@ -538,6 +558,7 @@ async def heating_tick() -> None:
             status["energy_mode"] = energy_mode
             status["planning_error"] = _last_planning_error
             status["last_plan_at"] = proposal.get("generated_at") if proposal else None
+            status["model"] = proposal.get("model", {}) if proposal else {}
             fresh = bool(
                 proposal
                 and usable

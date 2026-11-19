@@ -34,6 +34,11 @@ class Room(ComfortRange):
     temperature_max_age_seconds: int | None = Field(default=None, ge=60, le=21600)
     availability_entity: str | None = Field(default=None, pattern=r"^binary_sensor\.[a-z0-9_]+$")
     room_feedback: bool = False
+    energy_entity: str | None = Field(
+        default=None,
+        pattern=r"^sensor\.[a-z0-9_]+$",
+        description="This indoor unit's cumulative kWh counter; enables the daily model fit.",
+    )
     max_setpoint_offset_c: float = Field(default=5, ge=0, le=8)
     feedback_interval_seconds: int = Field(default=1800, ge=900, le=7200)
     capacity_kwh_per_k: float = Field(default=2, ge=0.2, le=30)

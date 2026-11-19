@@ -80,6 +80,30 @@ def read_temperatures(
     return result
 
 
+def planning_temperatures(
+    settings: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
+) -> dict[str, float]:
+    """Planner start temperatures, with an AC's own reading capped at its setpoint.
+
+    A heating indoor unit warms its own intake sensor 2-4 K above the room within
+    minutes. Planned from that reading, every target looks already met, the plan
+    flips to off, the reading falls back and the next plan heats again.
+    """
+    result = read_temperatures(settings, states, now)
+    for room in settings.rooms:
+        state = states.get(room.climate_entity, {})
+        setpoint = state.get("attributes", {}).get("temperature")
+        # ponytail: a sun-warmed room in Heat also reads as its setpoint. A separate
+        # temperature_entity turns the cap off and is the upgrade path.
+        if (
+            room.temperature_entity == room.climate_entity
+            and state.get("state") == "heat"
+            and isinstance(setpoint, (int, float))
+        ):
+            result[room.id] = min(result[room.id], float(setpoint))
+    return result
+
+
 def _signature(state: dict[str, Any]) -> dict[str, Any]:
     attrs = state.get("attributes", {})
     return {
