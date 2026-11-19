@@ -91,6 +91,16 @@ def day_sums(
     return sums
 
 
+def _records(stream: Iterable[str]) -> Iterable[dict[str, Any]]:
+    for line in stream:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue  # a crash or a concurrent append can leave a broken line
+        if isinstance(record, dict) and isinstance(record.get("at"), str):
+            yield record
+
+
 def fit(days: list[dict[str, dict[str, float]]], settings: HeatingSettings) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for room in settings.rooms:
@@ -167,7 +177,8 @@ def update(settings: HeatingSettings, directory: Path, now: datetime) -> dict[st
     for path in sorted(directory.glob("observations-*.jsonl")):
         if path.name == today:
             continue
-        with path.open() as stream:
-            records = (json.loads(line) for line in stream if line.endswith("}\n"))
-            days.append(day_sums(records, rooms, lambda room, outside: cop_at(group[room], outside)))
+        with path.open(errors="replace") as stream:
+            days.append(
+                day_sums(_records(stream), rooms, lambda room, outside: cop_at(group[room], outside))
+            )
     return {"fitted_on": now.strftime("%Y-%m-%d"), "rooms": fit(days, settings)}

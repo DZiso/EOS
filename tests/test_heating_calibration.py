@@ -52,6 +52,8 @@ def write_days(directory, days, phantom_day=None):
 
 def test_fit_recovers_loss_and_capacity_and_replaces_the_configured_guess(tmp_path):
     write_days(tmp_path, 7)
+    with (tmp_path / "observations-2026-11-03.jsonl").open("a") as stream:
+        stream.write('}\n\x00\x00\n[1]\n{"at": 5}\n{"at": "2026-11-03T23:5')  # what a crash leaves behind
     cfg = config()
     result = calibration.update(cfg, tmp_path, START + timedelta(days=6, hours=1))
     room = result["rooms"]["room"]
