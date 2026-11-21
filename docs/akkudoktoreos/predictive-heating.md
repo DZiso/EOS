@@ -92,11 +92,35 @@ configuration is not rewritten; `/v1/heating/status` shows the fit under
   needs 10 K of accumulated cooling before it replaces the configured ratio.
 - A fit needs three complete days, must predict each left-out day's heat within
   50 % in total, and skips days on which a unit used energy while reported off.
-- A unit's own reading is capped at its setpoint while it heats, in the fit and
-  as the planner's start temperature, because a running unit warms its own sensor.
+- In the fit, a unit's own reading is capped at its setpoint while it heats,
+  because a running unit warms its own sensor.
 
 The counters of indoor units on one outdoor unit are taken as that unit's
 allocation per room. If they are not, give those rooms no `energy_entity`.
+
+### Room temperature estimate
+
+An indoor unit's own sensor only reads too warm: 2–4 K while it heats, and for
+hours after it is switched off (22°C shown in an 18°C room). Planned from that
+reading, a preheat looks finished after 15 minutes and an idle room never looks
+cold. A room that uses its AC as `temperature_entity` and has an `energy_entity`
+is therefore followed with the room model:
+
+- Every tick the estimate gains the metered electricity times COP and loses
+  `loss_kw_per_k` times the difference to outside, with the fitted values when a
+  fit is applied.
+- A reading below the estimate replaces it. This happens within a minute of a
+  unit starting, when its fan pulls room air over the sensor.
+- A unit in Heat whose reading stayed above its setpoint for 20 minutes on no more
+  than 0.02 kWh is resting with its fan on. Its reading then replaces the
+  estimate in both directions.
+
+Planner and controller use the estimate; `/v1/heating/status` shows it under
+`runtime.estimates_c` next to the raw `temperatures_c`. It is the unit's own
+view of the room at its honest moments, not a calibrated room temperature. Other
+rooms use their reading as it is. An estimate below the comfort minimum does not
+make the plan infeasible: the plan starts from the minimum and the controller
+raises that room's setpoint by the shortfall, rounded up.
 
 ## Observation and execution
 
@@ -146,10 +170,11 @@ stop a healthy room's thermostat.
 For native AC thermostat control, use `room_feedback: false`, set
 `temperature_entity` to the AC's climate entity and `temperature_attribute` to
 `current_temperature`. The automatic setpoint stays inside the comfort range;
-no external sensor correction is added. A fresh accepted plan's current target
-is applied on the next control tick, including when the previous target changed
-recently. `block_minutes` sets the planner's target blocks; it does not impose
-an additional controller hold. Unchanged targets do not resend commands.
+no external sensor correction is added. An applied target is kept for one
+`block_minutes`, although the plan is revised every 15 minutes: without that hold
+targets flip between revisions and a preheat ends before it has warmed the room.
+A change of comfort band or tariff, or a lost plan, ends the hold at once; a room
+below its minimum may still be raised. Unchanged targets do not resend commands.
 Manual overrides, command acknowledgement and the ten-minute minimum off time
 still take priority.
 
@@ -198,10 +223,11 @@ These are unvalidated estimates. Off blocks have no heat and no compressor stand
 lower comfort limits stay hard. Single-block search moves cannot open a multi-hour
 off period, so a second search starts from the first plan with every block whose
 target is at or below the predicted temperature switched off; the better plan wins.
-The controller sends only the mode change and refuses the off period, keeping the
-AC heating at the comfort minimum, when the AC reading is below
-`min_c + comfort_margin_c`, before the unit has run for one `block_minutes`, or
-when the device has no off mode. A stale reading falls back to Heat. A planned off
+The controller sends only the mode change and refuses the off period when the room
+is below `min_c + comfort_margin_c`, before the unit has run for one
+`block_minutes`, while a target is held, or when the device has no off mode. A
+refused off period keeps a held target and otherwise heats to the comfort minimum.
+A stale reading falls back to Heat. A planned off
 period also holds for one block, unless the reading nears the comfort minimum;
 then the ten-minute minimum off time applies. Restarting reapplies mode, preset
 and target. A

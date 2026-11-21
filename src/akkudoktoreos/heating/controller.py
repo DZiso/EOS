@@ -1,11 +1,18 @@
 """Room thermostat and optional scheduling, with per-room HA ownership leases."""
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from akkudoktoreos.heating.models import HeatingSettings, Room
-from akkudoktoreos.heating.planner import comfort_at, quiet_at
+from akkudoktoreos.heating.planner import comfort_at, cop_at, quiet_at, tariff_at
+
+# In Heat with a reading above the setpoint the compressor rests while the fan keeps
+# room air on the unit's sensor: after this long, on no more than standby energy,
+# the reading is the room. Samsung units needed 13 minutes from 22 to 19 C; their
+# meters report up to 15 minutes late, so the time must stay longer than that.
+IDLE_SECONDS = 1200
+IDLE_KWH = 0.02
 
 
 def parse_time(value: str) -> datetime:
@@ -80,27 +87,70 @@ def read_temperatures(
     return result
 
 
-def planning_temperatures(
-    settings: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
+def estimate_temperatures(
+    settings: HeatingSettings,
+    states: dict[str, dict[str, Any]],
+    now: datetime,
+    memory: dict[str, Any],
+    outside_c: float | None,
 ) -> dict[str, float]:
-    """Planner start temperatures, with an AC's own reading capped at its setpoint.
+    """Room temperatures for planning and control; rooms without a usable reading are left out.
 
-    A heating indoor unit warms its own intake sensor 2-4 K above the room within
-    minutes. Planned from that reading, every target looks already met, the plan
-    flips to off, the reading falls back and the next plan heats again.
+    An indoor unit's own sensor only ever reads too warm: 2-4 K while it heats, and
+    for hours after it is switched off (22 C shown in an 18 C room). Between its
+    honest moments the room is therefore followed with the model, from metered
+    energy and heat loss, and a reading is believed when it is lower than that
+    or when the unit has rested in Heat. `memory` is updated in place.
+
+    The estimate is the unit's own view of the room at its honest moments, the
+    same view its thermostat acts on. It is not a calibrated room temperature.
     """
-    result = read_temperatures(settings, states, now)
+    group = {room: g for g in settings.compressors for room in g.rooms}
+    stamp = now.timestamp()
+    readings = temperature_status(settings, states, now)
+    result = {}
     for room in settings.rooms:
+        item = readings[room.id]
+        if not item["usable"]:
+            continue
+        reading = result[room.id] = item["temperature_c"]
         state = states.get(room.climate_entity, {})
+        heating = state.get("state") == "heat"
         setpoint = state.get("attributes", {}).get("temperature")
-        # ponytail: a sun-warmed room in Heat also reads as its setpoint. A separate
-        # temperature_entity turns the cap off and is the upgrade path.
-        if (
-            room.temperature_entity == room.climate_entity
-            and state.get("state") == "heat"
+        try:
+            energy = float(states[room.energy_entity or ""]["state"])
+        except (KeyError, TypeError, ValueError):
+            energy = math.nan
+        if room.temperature_entity != room.climate_entity or not math.isfinite(energy):
+            # A separate room sensor is believed as it is; without a meter there is no model.
+            memory.pop(room.id, None)
+            continue
+        past = memory.get(room.id)
+        if not past or not 0 < stamp - past["at"] <= 3600:
+            estimate = (
+                min(reading, setpoint)
+                if heating and isinstance(setpoint, (int, float))
+                else reading
+            )
+            past = {"idle_at": stamp, "idle_kwh": energy}
+        else:
+            estimate, used = past["c"], energy - past["kwh"]
+            if outside_c is not None:
+                # ponytail: heat exchanged with coupled rooms is left out; add it if a
+                # coupling grows well beyond the current 0.03 kW/K.
+                heat = used * cop_at(group[room.id], outside_c) if 0 <= used <= 1 else 0.0
+                loss = room.loss_kw_per_k * (estimate - outside_c) * (stamp - past["at"]) / 3600
+                estimate += (heat - loss) / room.capacity_kwh_per_k
+        if not (
+            heating
             and isinstance(setpoint, (int, float))
+            and reading > setpoint
+            and 0 <= energy - past["idle_kwh"] <= IDLE_KWH
         ):
-            result[room.id] = min(result[room.id], float(setpoint))
+            past.update(idle_at=stamp, idle_kwh=energy)
+        rested = stamp - past["idle_at"] >= IDLE_SECONDS
+        result[room.id] = estimate = reading if rested else min(estimate, reading)
+        memory[room.id] = {**past, "at": stamp, "c": estimate, "kwh": energy}
     return result
 
 
@@ -184,8 +234,12 @@ def commands(
     now: datetime,
     memory: dict[str, Any],
     decisions: dict[str, Any] | None = None,
+    estimates: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Calculate independent room decisions; observation never emits commands."""
+    """Calculate independent room decisions; observation never emits commands.
+
+    `estimates` replaces a room's raw reading where the caller knows better.
+    """
     decisions = decisions if decisions is not None else {}
     readings = temperature_status(settings, states, now)
     for room in settings.rooms:
@@ -268,7 +322,29 @@ def commands(
         if not isinstance(room_target, (float, int)) or not math.isfinite(room_target):
             room_target = band.fallback_c
         room_target = min(band.max_c, max(band.min_c, room_target))
-        temperature = reading.get("temperature_c") if reading["usable"] else None
+        temperature = (
+            (estimates or {}).get(room.id, reading.get("temperature_c"))
+            if reading["usable"]
+            else None
+        )
+        if temperature is not None and not room.room_feedback and temperature < band.min_c:
+            # The unit's own thermostat is satisfied before the room is: ask for more.
+            room_target = min(band.max_c, math.ceil(room_target + band.min_c - temperature))
+        # A native thermostat keeps an applied target for one block. Replanned every
+        # 15 minutes from a moving estimate, targets otherwise flip and a preheat ends
+        # before it has warmed the room. A new comfort band or tariff ends the hold.
+        changed_at = max(lease.get("last_change", 0), lease.get("last_mode_change", 0))
+        held = (
+            slot is not None
+            and not room.room_feedback
+            and not band_changed
+            and temperature is not None
+            and signature["hvac_mode"] == "heat"
+            and isinstance(signature["temperature"], (int, float))
+            and now.timestamp() - changed_at < settings.block_minutes * 60
+            and tariff_at(settings, now)
+            == tariff_at(settings, datetime.fromtimestamp(changed_at, timezone.utc))
+        )
         decision.update(
             room_target_c=room_target, source="eos" if slot else "comfort", state="active"
         )
@@ -296,7 +372,9 @@ def commands(
                     decision["off_refused"] = "unsupported_device"
                 elif temperature < band.min_c + settings.comfort_margin_c:
                     decision["off_refused"] = "below_comfort_floor"
-                elif signature["hvac_mode"] == "heat" and running < settings.block_minutes * 60:
+                elif held or (
+                    signature["hvac_mode"] == "heat" and running < settings.block_minutes * 60
+                ):
                     decision["off_refused"] = "minimum_run_time"
                 else:
                     decision.update(
@@ -314,6 +392,10 @@ def commands(
             )
             target = int(math.floor(room_target + offset + 0.5))
             decision["setpoint_offset_c"] = offset
+            if held:
+                # Below the floor the target may still rise, never fall.
+                current = int(signature["temperature"])
+                target = max(target, current) if temperature < band.min_c else current
         # A planned off period holds for one block unless the room nears its minimum.
         minimum_off = (
             settings.block_minutes * 60
@@ -346,9 +428,7 @@ def commands(
             or temperature >= band.max_c - settings.comfort_margin_c
             or band_changed
         )
-        # Only external-sensor corrections need a settling interval. Native
-        # thermostats must receive the accepted plan's current target; planner
-        # block duration is not an execution hold on an older plan's target.
+        # External-sensor corrections need a settling interval of their own.
         if (
             room.room_feedback
             and not urgent

@@ -17,13 +17,14 @@ from loguru import logger
 from akkudoktoreos.heating import calibration
 from akkudoktoreos.heating.controller import (
     commands,
+    estimate_temperatures,
     parse_time,
     read_number,
-    planning_temperatures,
+    read_temperatures,
     temperature_status,
 )
 from akkudoktoreos.heating.models import ForecastSlot, HeatingSettings, PlanningInput
-from akkudoktoreos.heating.planner import plan, tariff_at
+from akkudoktoreos.heating.planner import comfort_at, plan, tariff_at
 
 
 def data_dir() -> Path:
@@ -316,9 +317,18 @@ def battery_status(
 
 
 async def planning_input(
-    config: HeatingSettings, states: dict[str, dict[str, Any]], now: datetime
+    config: HeatingSettings,
+    states: dict[str, dict[str, Any]],
+    now: datetime,
+    estimates: dict[str, float] | None = None,
 ) -> PlanningInput:
-    temperatures = planning_temperatures(config, states, now)
+    temperatures = read_temperatures(config, states, now)
+    # A room below its floor is the controller's job (it raises the setpoint). Planned
+    # from the floor, one cold room cannot make the plan for every room infeasible.
+    temperatures = {
+        room.id: max((estimates or temperatures)[room.id], comfort_at(config, room, now).min_c)
+        for room in config.rooms
+    }
     soc = None
     warnings = [
         "Household baseline is a configured estimate excluding HVAC; verify against observations."
@@ -396,6 +406,14 @@ async def planning_input(
     )
 
 
+def outside_now(now: datetime) -> float | None:
+    """The outdoor temperature the latest plan was made with, if under an hour old."""
+    for slot in reversed(load_json(data_dir() / "input.json", {}).get("slots", [])[:8]):
+        if 0 <= now.timestamp() - parse_time(slot["at"]).timestamp() < 3600:
+            return slot["outside_c"]
+    return None
+
+
 def record_observation(
     config: HeatingSettings,
     states: dict[str, dict[str, Any]],
@@ -435,10 +453,9 @@ def record_observation(
             },
         }
     # The model fit needs the outdoor temperature each plan was made with.
-    for slot in reversed(load_json(data_dir() / "input.json", {}).get("slots", [])[:8]):
-        if 0 <= now.timestamp() - parse_time(slot["at"]).timestamp() < 3600:
-            observation["outside_c"] = slot["outside_c"]
-            break
+    outside = outside_now(now)
+    if outside is not None:
+        observation["outside_c"] = outside
     quality = temperature_status(config, states, now)
     observation["measurements"] = quality
     observation["temperatures_c"] = {
@@ -506,6 +523,17 @@ async def heating_tick() -> None:
             status["temperatures_c"] = {
                 room: item["temperature_c"] for room, item in readings.items() if item["usable"]
             }
+            fitted = load_json(data_dir() / "calibration.json", {})
+            followed = load_json(data_dir() / "estimate.json", {})
+            estimates = estimate_temperatures(
+                calibration.apply(config, fitted.get("rooms", {})),
+                states,
+                now,
+                followed,
+                outside_now(now),
+            )
+            save_json(data_dir() / "estimate.json", followed)
+            status["estimates_c"] = estimates
             status["battery"] = battery_status(config, states, now)
             # Battery changes invalidate incompatible plans immediately. PV is
             # checked independently during planning; a PV outage retries in five
@@ -533,8 +561,7 @@ async def heating_tick() -> None:
                 _last_planning_mode = requested_mode
                 try:
                     await bootstrap_forecasts(config, client)
-                    inputs = await planning_input(config, states, now)
-                    fitted = load_json(data_dir() / "calibration.json", {})
+                    inputs = await planning_input(config, states, now, estimates)
                     if fitted.get("fitted_on") != now.strftime("%Y-%m-%d"):
                         try:
                             fitted = await asyncio.to_thread(
@@ -577,7 +604,9 @@ async def heating_tick() -> None:
                 proposal.get("recovering_rooms", []) if fresh and proposal else []
             )
             decisions: dict[str, Any] = {}
-            calls = commands(config, proposal if fresh else None, states, now, memory, decisions)
+            calls = commands(
+                config, proposal if fresh else None, states, now, memory, decisions, estimates
+            )
             status["rooms"] = decisions
             status["state"] = "observing" if config.mode == "observe" else "controlling"
             if config.mode == "observe" and (not usable or _last_planning_error):

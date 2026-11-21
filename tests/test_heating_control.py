@@ -14,7 +14,11 @@ from pydantic import ValidationError
 
 from akkudoktoreos.core import coreabc
 from akkudoktoreos.heating import runtime
-from akkudoktoreos.heating.controller import commands, planning_temperatures, temperature_status
+from akkudoktoreos.heating.controller import (
+    commands,
+    estimate_temperatures,
+    temperature_status,
+)
 from akkudoktoreos.heating.models import ComfortRange, Compressor, HeatingSettings, Room
 from akkudoktoreos.server.rest.heating import router
 
@@ -169,7 +173,7 @@ def test_exact_night_minimum_reaches_native_thermostat_and_override_still_wins()
 
 
 @pytest.mark.parametrize('previous_target,next_target', [(21, 19), (19, 18), (19, 21)])
-def test_native_thermostat_follows_new_plan_without_an_execution_hold(previous_target, next_target):
+def test_native_thermostat_holds_a_target_for_the_block_but_not_across_a_tariff_change(previous_target, next_target):
     cfg, states, memory = setup_control()
     cfg.optimization_enabled = cfg.allow_estimated_model_control = True
     room = cfg.rooms[1]
@@ -185,9 +189,15 @@ def test_native_thermostat_follows_new_plan_without_an_execution_hold(previous_t
     assert states[room.climate_entity]['attributes']['temperature'] == previous_target
     assert memory[room.climate_entity]['last_change'] == before.timestamp()
 
-    # Reproduce the 05:02 plan revision after the cheap tariff ends. Persisted
-    # last_change from the previous release must not delay the new plan.
+    # A replan inside the block and the same tariff changes nothing: no flipping.
     memory = json.loads(json.dumps(memory))
+    soon = before + timedelta(minutes=10)
+    assert not [c for c in commands(cfg, {'feasible': True, 'generated_at': soon.isoformat(),
+                                          'slots': [{'at': soon.isoformat(), 'targets_c': {'other': next_target}}]},
+                                    states, soon, memory)
+                if c['data']['entity_id'] == room.climate_entity]
+    # Reproduce the 05:02 plan revision after the cheap tariff ends. The hold
+    # from the previous tariff must not delay the new plan.
     later = before + timedelta(minutes=15)
     proposal = {'feasible': True, 'generated_at': later.isoformat(),
                 'slots': [{'at': later.isoformat(), 'targets_c': {'other': next_target}}]}
@@ -419,11 +429,11 @@ def test_planned_off_switches_mode_only_and_restarts_after_minimum_off_time():
     assert decisions['other']['state'] == 'manual_override'
 
 
-@pytest.mark.parametrize('reading,ran_minutes,reason', [
-    (19, 120, 'below_comfort_floor'),   # 19 < min 19 + 0.25 margin
-    (24, 30, 'minimum_run_time'),
+@pytest.mark.parametrize('reading,ran_minutes,reason,target', [
+    (19, 120, 'below_comfort_floor', 19),   # 19 < min 19 + 0.25 margin
+    (24, 30, 'minimum_run_time', 19),
 ])
-def test_planned_off_is_refused_near_the_floor_and_before_minimum_run(reading, ran_minutes, reason):
+def test_planned_off_is_refused_near_the_floor_and_before_minimum_run(reading, ran_minutes, reason, target):
     cfg, states, memory = native_off_setup()
     states['climate.other']['attributes']['current_temperature'] = reading
     memory['climate.other'] = {'last_mode_change': (NOW - timedelta(minutes=ran_minutes)).timestamp()}
@@ -431,18 +441,60 @@ def test_planned_off_is_refused_near_the_floor_and_before_minimum_run(reading, r
     calls = other_calls(commands(cfg, off_plan(NOW, 'off'), states, NOW, memory, decisions))
     assert decisions['other']['off_refused'] == reason
     assert all(c['service'] != 'set_hvac_mode' for c in calls)
-    assert decisions['other']['ac_target_c'] == 19
+    assert decisions['other']['ac_target_c'] == target
 
 
-def test_planner_caps_a_heating_units_own_reading_at_its_setpoint():
+def test_an_off_planned_inside_the_hold_keeps_the_target_being_heated_to():
+    cfg, states, memory = native_off_setup()
+    acknowledge(states, commands(cfg, off_plan(NOW, 21), states, NOW, memory))  # preheat from 22 to 21
+    later = NOW + timedelta(minutes=15)
+    states['climate.other']['last_reported'] = later.isoformat()
+    decisions: dict[str, Any] = {}
+    assert not other_calls(commands(cfg, off_plan(later, 'off'), states, later, memory, decisions))
+    assert decisions['other']['off_refused'] == 'minimum_run_time' and decisions['other']['ac_target_c'] == 21
+
+
+def test_a_room_below_its_floor_gets_a_higher_setpoint_that_is_then_held():
+    cfg, states, memory = native_off_setup()
+    states['climate.other']['attributes'].update(temperature=19, current_temperature=20)
+    decisions: dict[str, Any] = {}
+    # The unit reads 20 and rests at setpoint 19, the room is estimated at 18.4.
+    acknowledge(states, commands(cfg, off_plan(NOW, 19), states, NOW, memory, decisions, {'other': 18.4}))
+    assert states['climate.other']['attributes']['temperature'] == 20
+    later = NOW + timedelta(minutes=15)
+    states['climate.other']['last_reported'] = later.isoformat()
+    assert not other_calls(commands(cfg, off_plan(later, 19), states, later, memory, decisions, {'other': 19.2}))
+    later = NOW + timedelta(minutes=61)
+    states['climate.other']['last_reported'] = later.isoformat()
+    acknowledge(states, commands(cfg, off_plan(later, 19), states, later, memory, decisions, {'other': 19.2}))
+    assert states['climate.other']['attributes']['temperature'] == 19
+
+
+def test_room_estimate_follows_metered_energy_and_not_a_units_warm_sensor():
+    """The night of 2026-11-21: 22 C shown for hours in an 18 C room, preheating cut short."""
     cfg, states, _ = setup_control()
     native = cfg.rooms[1]
-    native.temperature_entity, native.temperature_attribute = native.climate_entity, "current_temperature"
-    # Heating to 22 with the intake at 24: the room cannot be above 22.
-    assert planning_temperatures(cfg, states, NOW) == {"room": 20, "other": 22}
-    # A cooler reading is believed, and so is any reading once the unit is off.
-    states["climate.other"]["attributes"]["current_temperature"] = 21
-    assert planning_temperatures(cfg, states, NOW)["other"] == 21
-    states["climate.other"].update(state="off")
-    states["climate.other"]["attributes"]["current_temperature"] = 24
-    assert planning_temperatures(cfg, states, NOW)["other"] == 24
+    native.temperature_entity, native.temperature_attribute = native.climate_entity, 'current_temperature'
+    native.energy_entity, native.loss_kw_per_k, native.capacity_kwh_per_k = 'sensor.energy', 0.03, 1.5
+    memory: dict[str, Any] = {}
+    clock, meter = [NOW], [100.0]
+
+    def run(minutes, mode, setpoint, reading, kwh=0.0):
+        for _ in range(minutes):
+            clock[0] += timedelta(minutes=1)
+            meter[0] += kwh / minutes
+            states['climate.other'].update(state=mode, last_reported=clock[0].isoformat())
+            states['climate.other']['attributes'].update(temperature=setpoint, current_temperature=reading)
+            states['sensor.room']['last_reported'] = clock[0].isoformat()
+            states['sensor.energy'] = {'state': str(meter[0])}
+            result = estimate_temperatures(cfg, states, clock[0], memory, 1.0)
+        assert result['room'] == 20  # a separate room sensor is believed as it is
+        return result['other']
+
+    assert run(21, 'heat', 18, 19) == 19  # resting above its setpoint: the reading is the room
+    assert 18 < run(120, 'off', 19, 22) < 18.6  # off: cools by the model, the sensor stays warm
+    assert run(1, 'heat', 22, 18) == 18  # the fan starts and the reading drops to the truth
+    assert 18.3 < run(60, 'heat', 22, 23, kwh=0.5) < 18.8  # an hour of preheating is not 22 yet
+    assert run(19, 'heat', 19, 20) < 19  # above its setpoint the unit rests...
+    assert run(2, 'heat', 19, 20) == 20  # ...and after 20 minutes its reading is the room
+    assert json.loads(json.dumps(memory)) == memory and 'room' not in memory

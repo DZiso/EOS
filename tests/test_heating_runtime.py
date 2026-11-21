@@ -563,4 +563,5 @@ async def test_tick_records_outdoor_temperature_and_reports_the_model_fit(tmp_pa
     assert record["outside_c"] == 8 and "sensor.room_energy" in record["entities"]
     status = json.loads((tmp_path / "heating" / "status.json").read_text())
     assert status["model"]["room"] == {"days": 0, "applied": False, "reason": "not enough data"}
+    assert status["estimates_c"] == {"room": 20}
     assert json.loads((tmp_path / "heating" / "calibration.json").read_text())["fitted_on"]
