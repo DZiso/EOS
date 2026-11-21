@@ -330,10 +330,11 @@ def commands(
             if reading["usable"]
             else None
         )
-        cold = temperature is not None and temperature < band.min_c - FLOOR_DEADBAND_K
+        shortfall = band.min_c - temperature if temperature is not None else 0.0
+        cold = shortfall > FLOOR_DEADBAND_K
         if cold and not room.room_feedback:
             # The unit's own thermostat is satisfied before the room is: ask for more.
-            room_target = min(band.max_c, math.ceil(room_target + band.min_c - temperature))
+            room_target = min(band.max_c, math.ceil(room_target + shortfall))
         # A native thermostat keeps an applied target for one block. Replanned every
         # 15 minutes from a moving estimate, targets otherwise flip and a preheat ends
         # before it has warmed the room. A new comfort band or tariff ends the hold.
