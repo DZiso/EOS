@@ -120,7 +120,8 @@ Planner and controller use the estimate; `/v1/heating/status` shows it under
 view of the room at its honest moments, not a calibrated room temperature. Other
 rooms use their reading as it is. An estimate below the comfort minimum does not
 make the plan infeasible: the plan starts from the minimum and the controller
-raises that room's setpoint by the shortfall, rounded up.
+raises that room's setpoint by the shortfall, rounded up, once the shortfall
+exceeds 0.3 K.
 
 ## Observation and execution
 

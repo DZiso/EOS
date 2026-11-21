@@ -464,9 +464,10 @@ def test_a_room_below_its_floor_gets_a_higher_setpoint_that_is_then_held():
     later = NOW + timedelta(minutes=15)
     states['climate.other']['last_reported'] = later.isoformat()
     assert not other_calls(commands(cfg, off_plan(later, 19), states, later, memory, decisions, {'other': 19.2}))
+    # After the hold: 0.1 K below the floor is the estimate's noise, not a shortfall.
     later = NOW + timedelta(minutes=61)
     states['climate.other']['last_reported'] = later.isoformat()
-    acknowledge(states, commands(cfg, off_plan(later, 19), states, later, memory, decisions, {'other': 19.2}))
+    acknowledge(states, commands(cfg, off_plan(later, 19), states, later, memory, decisions, {'other': 18.9}))
     assert states['climate.other']['attributes']['temperature'] == 19
 
 

@@ -13,6 +13,9 @@ from akkudoktoreos.heating.planner import comfort_at, cop_at, quiet_at, tariff_a
 # meters report up to 15 minutes late, so the time must stay longer than that.
 IDLE_SECONDS = 1200
 IDLE_KWH = 0.02
+# A room held at its minimum is always estimated a little below it. Only a real
+# shortfall raises the setpoint; less than this is the estimate's own noise.
+FLOOR_DEADBAND_K = 0.3
 
 
 def parse_time(value: str) -> datetime:
@@ -327,7 +330,8 @@ def commands(
             if reading["usable"]
             else None
         )
-        if temperature is not None and not room.room_feedback and temperature < band.min_c:
+        cold = temperature is not None and temperature < band.min_c - FLOOR_DEADBAND_K
+        if cold and not room.room_feedback:
             # The unit's own thermostat is satisfied before the room is: ask for more.
             room_target = min(band.max_c, math.ceil(room_target + band.min_c - temperature))
         # A native thermostat keeps an applied target for one block. Replanned every
@@ -395,7 +399,7 @@ def commands(
             if held:
                 # Below the floor the target may still rise, never fall.
                 current = int(signature["temperature"])
-                target = max(target, current) if temperature < band.min_c else current
+                target = max(target, current) if cold else current
         # A planned off period holds for one block unless the room nears its minimum.
         minimum_off = (
             settings.block_minutes * 60
